@@ -23,18 +23,24 @@ function fnv(text: string): string {
 
 /** 构建结束后写出 sw.js。新版本安装后等待，直到页面点「点一下更新」。 */
 export function pwaPlugin(distDir: string): Plugin {
+  let base = '/';
   return {
     name: 'kea-pwa',
     apply: 'build',
+    configResolved(config) {
+      base = config.base.endsWith('/') ? config.base : `${config.base}/`;
+    },
     closeBundle() {
       const files = walk(distDir)
         .map((full) => relative(distDir, full).split(sep).join('/'))
         .filter((file) => file !== 'sw.js')
         .sort();
-      const urls = [...new Set(['/', ...files.map((file) => `/${file}`)])];
+      const urls = [...new Set([base, ...files.map((file) => `${base}${file}`)])];
+      const indexUrl = `${base}index.html`;
       const cache = `kea-${fnv(urls.join('\n'))}`;
       const source = `const CACHE=${JSON.stringify(cache)};
 const ASSETS=${JSON.stringify(urls)};
+const INDEX=${JSON.stringify(indexUrl)};
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
 });
@@ -56,7 +62,7 @@ self.addEventListener('fetch', (event) => {
       return await fetch(event.request);
     } catch (error) {
       if (event.request.mode === 'navigate') {
-        const fallback = await cache.match('/index.html');
+        const fallback = await cache.match(INDEX);
         if (fallback) return fallback;
       }
       throw error;

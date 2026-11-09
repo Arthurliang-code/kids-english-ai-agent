@@ -1,8 +1,8 @@
 {
   "name": "儿童英语点读",
   "short_name": "点读",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#f5f6f8",
   "theme_color": "#ffffff",

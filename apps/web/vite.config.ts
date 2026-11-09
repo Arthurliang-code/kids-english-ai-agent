@@ -122,7 +122,10 @@ export default defineConfig(({ mode }) => {
   const rootDir = fileURLToPath(new URL('../..', import.meta.url));
   const env = loadEnv(mode, rootDir, '');
 
+  const appBase = process.env.VITE_APP_BASE || env.VITE_APP_BASE || '/';
+
   return {
+    base: appBase.endsWith('/') ? appBase : `${appBase}/`,
     plugins: [
       react(),
       pwaPlugin(fileURLToPath(new URL('./dist', import.meta.url))),
