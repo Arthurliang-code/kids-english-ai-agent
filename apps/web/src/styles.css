@@ -947,11 +947,29 @@ button.big {
   line-height: 1.05;
 }
 
+.word-card-phonetic {
+  margin: -4px 0 8px;
+  font-size: 22px;
+  color: var(--muted);
+}
+
+.word-sense {
+  margin-top: 12px;
+}
+
+.word-sense-label {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
 .word-card-meaning {
+  margin: 0;
   font-size: 28px;
 }
 
 .word-card-example {
+  margin: 0 0 8px;
   font-size: 20px;
 }
 

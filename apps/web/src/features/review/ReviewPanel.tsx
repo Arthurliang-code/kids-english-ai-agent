@@ -1,14 +1,11 @@
 import { useEffect, useState } from 'react';
-import { lookupGlossary } from '../../content/glossary';
-import { getTake, importVocabFile, listItems, putItem, putTake, toVocabFile } from '../../data/vocab-db';
+import { importVocabFile, listItems, putItem, toVocabFile } from '../../data/vocab-db';
 import { dueItems, grade, todayISO, type ReviewItem } from '../../domain/review';
-import { recordClip } from '../../speech/record';
-import { speakEnglish, stopSpeaking } from '../../speech/speak';
+import { speakEnglish } from '../../speech/speak';
+import { WordCard } from '../ocr-lab/WordCard';
 
 export function ReviewPanel() {
   const [queue, setQueue] = useState<ReviewItem[] | null>(null);
-  const [takeUrl, setTakeUrl] = useState<string | null>(null);
-  const [recording, setRecording] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
   const reload = async () => {
@@ -22,22 +19,9 @@ export function ReviewPanel() {
 
   const current = queue?.[0] ?? null;
 
-  useEffect(() => {
-    let url: string | null = null;
-    setTakeUrl(null);
-    if (!current) return;
-    void getTake(current.word).then((blob) => {
-      if (!blob) return;
-      url = URL.createObjectURL(blob);
-      setTakeUrl(url);
-    });
-    return () => {
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [current]);
-
   const mark = async (correct: boolean) => {
     if (!current) return;
+    if (!correct) speakEnglish(current.word);
     const next = grade(current, correct, todayISO());
     await putItem(next);
     setQueue((items) => {
@@ -45,23 +29,6 @@ export function ReviewPanel() {
       const rest = items.slice(1);
       return next.due <= todayISO() ? [next, ...rest] : rest;
     });
-  };
-
-  const startRecording = () => {
-    if (!current) return;
-    stopSpeaking();
-    const clip = recordClip();
-    setRecording(true);
-    void clip.done
-      .then(async (blob) => {
-        await putTake(current.word, blob);
-        setTakeUrl((previous) => {
-          if (previous) URL.revokeObjectURL(previous);
-          return URL.createObjectURL(blob);
-        });
-      })
-      .catch(() => setNote('请打开麦克风，再说一遍。'))
-      .finally(() => setRecording(false));
   };
 
   const exportFile = async () => {
@@ -80,7 +47,7 @@ export function ReviewPanel() {
       const parsed: unknown = JSON.parse(await file.text());
       const items = await importVocabFile(parsed);
       if (!items) {
-        setNote('这份 JSON 不是生词本导出的格式。');
+        setNote('这份文件不是生词本。');
         return;
       }
       setNote(null);
@@ -90,8 +57,6 @@ export function ReviewPanel() {
     }
   };
 
-  const entry = current ? lookupGlossary(current.word) : null;
-
   return (
     <section className="review">
       <div className="card review-card">
@@ -100,27 +65,7 @@ export function ReviewPanel() {
         ) : current ? (
           <>
             <p className="review-count">今天还有 {queue.length} 个</p>
-            <p className="word-card-text">{current.word}</p>
-            {entry ? <p className="word-card-meaning">{entry.meaning}</p> : null}
-            {entry ? <p className="word-card-example">{entry.example}</p> : null}
-            <div className="word-card-actions">
-              <button className="kid-listen" type="button" onClick={() => speakEnglish(current.word)}>
-                听一听
-              </button>
-              <button type="button" onClick={startRecording} disabled={recording}>
-                {recording ? '正在听你读…' : '我来读'}
-              </button>
-              <button
-                type="button"
-                disabled={!takeUrl}
-                onClick={() => {
-                  if (!takeUrl) return;
-                  void new Audio(takeUrl).play();
-                }}
-              >
-                听我读的
-              </button>
-            </div>
+            <WordCard text={current.word} trusted />
             <div className="word-card-actions">
               <button className="kid-listen" type="button" onClick={() => void mark(true)}>
                 会了
