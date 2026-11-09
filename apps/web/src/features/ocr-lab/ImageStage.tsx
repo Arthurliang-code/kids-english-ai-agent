@@ -1,5 +1,5 @@
 import type { OcrWord, Quad } from '@kea/shared-types';
-import { bandOf, isSuspicious, isTrusted } from '../../platform/core/classify';
+import { isSuspicious, isTrusted } from '../../platform/core/classify';
 
 export type WordFilter = 'trusted' | 'suspicious' | 'all';
 
@@ -26,23 +26,22 @@ export function ImageStage({ src, words, selectedId, filter, onSelect }: ImageSt
 
   return (
     <div className="stage">
-      <img src={src} alt="待识别原图" draggable={false} />
+      <img src={src} alt="这一页" draggable={false} />
       <svg className="overlay" viewBox="0 0 1 1" preserveAspectRatio="none">
         {visible.map((word) => {
-          const band = bandOf(word.confidence);
           const selected = word.id === selectedId;
           return (
             <polygon
               key={word.id}
               points={toPoints(word.quad)}
-              className={`word-box band-${band}${selected ? ' is-selected' : ''}`}
+              className={`word-box${selected ? ' is-selected' : ''}`}
               vectorEffect="non-scaling-stroke"
               onPointerDown={(event) => {
                 event.preventDefault();
                 onSelect(word);
               }}
             >
-              <title>{`${word.text} · ${(word.confidence * 100).toFixed(0)}%`}</title>
+              <title>{word.text}</title>
             </polygon>
           );
         })}

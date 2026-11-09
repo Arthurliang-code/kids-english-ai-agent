@@ -60,7 +60,7 @@ export function ReviewPanel() {
           return URL.createObjectURL(blob);
         });
       })
-      .catch(() => setNote('没有拿到麦克风，可以在设置里允许后再读一遍。'))
+      .catch(() => setNote('请打开麦克风，再说一遍。'))
       .finally(() => setRecording(false));
   };
 
@@ -101,17 +101,16 @@ export function ReviewPanel() {
           <>
             <p className="review-count">今天还有 {queue.length} 个</p>
             <p className="word-card-text">{current.word}</p>
-            <p className="word-card-meaning">{entry ? entry.meaning : '还没有释义'}</p>
+            {entry ? <p className="word-card-meaning">{entry.meaning}</p> : null}
             {entry ? <p className="word-card-example">{entry.example}</p> : null}
             <div className="word-card-actions">
-              <button className="primary big" type="button" onClick={() => speakEnglish(current.word)}>
-                听一遍
+              <button className="kid-listen" type="button" onClick={() => speakEnglish(current.word)}>
+                听一听
               </button>
-              <button className="big" type="button" onClick={startRecording} disabled={recording}>
-                {recording ? '正在听…' : '我来读'}
+              <button type="button" onClick={startRecording} disabled={recording}>
+                {recording ? '正在听你读…' : '我来读'}
               </button>
               <button
-                className="big"
                 type="button"
                 disabled={!takeUrl}
                 onClick={() => {
@@ -119,40 +118,43 @@ export function ReviewPanel() {
                   void new Audio(takeUrl).play();
                 }}
               >
-                听我的
+                听我读的
               </button>
             </div>
             <div className="word-card-actions">
-              <button className="primary big" type="button" onClick={() => void mark(true)}>
-                记住了
+              <button className="kid-listen" type="button" onClick={() => void mark(true)}>
+                会了
               </button>
-              <button className="big" type="button" onClick={() => void mark(false)}>
-                再看看
+              <button type="button" onClick={() => void mark(false)}>
+                再听一遍
               </button>
             </div>
           </>
         ) : (
-          <p className="empty-title">今天没有要复习的词</p>
+          <p className="kid-hello">今天的词都复习完了</p>
         )}
         {note ? <p className="footnote">{note}</p> : null}
       </div>
-      <div className="word-card-actions">
-        <button type="button" onClick={() => void exportFile()}>
-          导出生词本
-        </button>
-        <label className="btn-file">
-          导回生词本
-          <input
-            type="file"
-            accept="application/json"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              event.target.value = '';
-              if (file) void importFile(file);
-            }}
-          />
-        </label>
-      </div>
+      <details className="parent-tools">
+        <summary>爸爸妈妈</summary>
+        <div className="word-card-actions">
+          <button type="button" onClick={() => void exportFile()}>
+            导出
+          </button>
+          <label className="kid-album">
+            导回
+            <input
+              type="file"
+              accept="application/json"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                if (file) void importFile(file);
+              }}
+            />
+          </label>
+        </div>
+      </details>
     </section>
   );
 }

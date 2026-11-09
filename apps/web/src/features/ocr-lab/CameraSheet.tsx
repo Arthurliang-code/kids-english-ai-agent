@@ -40,9 +40,9 @@ export function CameraSheet({ open, onClose, onCapture }: CameraSheetProps) {
         await video.play().catch(() => undefined);
         if (!cancelled) setLive(true);
       })
-      .catch((err: unknown) => {
+      .catch(() => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : '无法访问摄像头，请改用相册选图');
+        setError('打不开相机，去相册里选一张吧。');
       });
 
     return () => {
@@ -71,15 +71,15 @@ export function CameraSheet({ open, onClose, onCapture }: CameraSheetProps) {
     <div className="sheet-backdrop" role="dialog" aria-modal="true">
       <div className="sheet">
         <div className="sheet-head">
-          <span>拍照</span>
+          <span>把书放进框里</span>
           <button className="ghost" onClick={onClose}>
-            关闭
+            返回
           </button>
         </div>
 
         <div className="video-wrap">
           <video ref={videoRef} playsInline muted autoPlay />
-          {!live && !error && <div className="video-hint">正在打开摄像头…</div>}
+          {!live && !error && <div className="video-hint">正在打开相机…</div>}
           {error && <div className="video-hint error">{error}</div>}
         </div>
 

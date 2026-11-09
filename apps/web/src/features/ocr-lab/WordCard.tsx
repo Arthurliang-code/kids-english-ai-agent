@@ -57,26 +57,26 @@ export function WordCard({ text, trusted }: WordCardProps) {
           return URL.createObjectURL(blob);
         });
       })
-      .catch(() => setNote('没有拿到麦克风，可以在设置里允许后再读一遍。'))
+      .catch(() => setNote('请打开麦克风，再说一遍。'))
       .finally(() => setRecording(false));
   };
 
   return (
-    <section className="card word-card">
+    <section className="word-card">
       <p className="word-card-text">{text}</p>
       {trusted ? (
         <>
-          <p className="word-card-meaning">{entry ? entry.meaning : '还没有释义'}</p>
+          {entry ? <p className="word-card-meaning">{entry.meaning}</p> : null}
           {entry ? <p className="word-card-example">{entry.example}</p> : null}
           <div className="word-card-actions">
-            <button className="primary" type="button" onClick={() => speakEnglish(text)}>
-              听一遍
+            <button className="kid-listen" type="button" onClick={() => speakEnglish(text)}>
+              听一听
             </button>
             <button type="button" onClick={() => void save()} disabled={saved}>
-              {saved ? '已在生词本' : '收入生词本'}
+              {saved ? '记下了' : '记下来'}
             </button>
             <button type="button" onClick={startRecording} disabled={recording}>
-              {recording ? '正在听…' : '我来读'}
+              {recording ? '正在听你读…' : '我来读'}
             </button>
             <button
               type="button"
@@ -87,13 +87,13 @@ export function WordCard({ text, trusted }: WordCardProps) {
                 void audio.play();
               }}
             >
-              听我的
+              听我读的
             </button>
           </div>
           {note ? <p className="footnote">{note}</p> : null}
         </>
       ) : (
-        <p className="word-card-meaning">词库里没有这个词，先不读。</p>
+        <p className="word-card-meaning">这个先不读。</p>
       )}
     </section>
   );
