@@ -75,11 +75,14 @@ function candidates(word: string): string[] {
   return out;
 }
 
+/** 原形 + 常见变形还原，供词库和释义共用。 */
+export function lemmaCandidates(word: string): string[] {
+  const lower = word.toLowerCase();
+  return [lower, ...candidates(lower)];
+}
+
 export function lookupWord(lexicon: Set<string> | null, word: string): boolean {
   // 词库不可用时不做判定，避免把所有词都误标为可疑
   if (!lexicon) return true;
-
-  const lower = word.toLowerCase();
-  if (lexicon.has(lower)) return true;
-  return candidates(lower).some((candidate) => lexicon.has(candidate));
+  return lemmaCandidates(word).some((candidate) => lexicon.has(candidate));
 }

@@ -5,11 +5,19 @@ export interface GlossaryEntry {
   phonetic?: string;
 }
 
-/** 按识别出的词查家长写过的释义。大小写不敏感，不做词形还原。 */
+/** 按识别出的词查释义。keys 可带词形还原后的原形，先精确再原形。 */
 export function findGlossaryEntry(
   entries: readonly GlossaryEntry[],
   word: string,
+  keys: readonly string[] = [],
 ): GlossaryEntry | null {
-  const key = word.toLowerCase();
-  return entries.find((entry) => entry.word.toLowerCase() === key) ?? null;
+  const seen = new Set<string>();
+  for (const raw of [word, ...keys]) {
+    const key = raw.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const hit = entries.find((entry) => entry.word.toLowerCase() === key);
+    if (hit) return hit;
+  }
+  return null;
 }

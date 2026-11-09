@@ -31,7 +31,13 @@ export function WordCard({ text, trusted }: WordCardProps) {
       const [item, take, next] = await Promise.all([
         getItem(text),
         getTake(text),
-        trusted ? resolveSense(text) : Promise.resolve(null),
+        trusted
+          ? resolveSense(text).catch(() => ({
+              word: text,
+              meaning: `${text}（先听读音）`,
+              example: `This is ${text}.`,
+            }))
+          : Promise.resolve(null),
       ]);
       if (cancelled) return;
       if (item) setSaved(true);

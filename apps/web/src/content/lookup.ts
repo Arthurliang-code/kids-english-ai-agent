@@ -31,8 +31,12 @@ function writeCache(entry: GlossaryEntry): void {
   }
 }
 
+function hasHan(text: string): boolean {
+  return /[\u4e00-\u9fff]/.test(text);
+}
+
 function pickExample(payload: unknown, word: string): string {
-  if (!Array.isArray(payload)) return `I can say "${word}".`;
+  if (!Array.isArray(payload)) return `This is ${word}.`;
   for (const entry of payload) {
     const meanings = (entry as { meanings?: { definitions?: { example?: string }[] }[] }).meanings;
     for (const meaning of meanings ?? []) {
@@ -41,41 +45,52 @@ function pickExample(payload: unknown, word: string): string {
       }
     }
   }
-  return `I can say "${word}".`;
+  return `This is ${word}.`;
 }
 
 function pickPhonetic(payload: unknown): string | undefined {
   if (!Array.isArray(payload)) return undefined;
   const first = payload[0] as { phonetic?: string; phonetics?: { text?: string }[] } | undefined;
-  const text = first?.phonetic || first?.phonetics?.find((item) => item.text)?.text;
-  return text || undefined;
+  return first?.phonetic || first?.phonetics?.find((item) => item.text)?.text || undefined;
+}
+
+async function fetchJson(url: string, ms = 4000): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), ms);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function fetchSense(word: string): Promise<GlossaryEntry> {
   const query = encodeURIComponent(word);
   const [zhPage, enPage] = await Promise.all([
-    fetch(`https://api.mymemory.translated.net/get?q=${query}&langpair=en|zh-CN`).then((response) =>
-      response.ok ? response.json() : null,
-    ),
-    fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${query}`).then((response) =>
-      response.ok ? response.json() : null,
-    ),
+    fetchJson(`https://api.mymemory.translated.net/get?q=${query}&langpair=en|zh-CN`),
+    fetchJson(`https://api.dictionaryapi.dev/api/v2/entries/en/${query}`),
   ]);
 
   const translated = (zhPage as { responseData?: { translatedText?: string } } | null)?.responseData
     ?.translatedText;
   const meaning =
-    translated && translated.toLowerCase() !== word.toLowerCase() ? translated : `${word}（英文单词）`;
+    translated && hasHan(translated) && translated.toLowerCase() !== word.toLowerCase()
+      ? translated
+      : null;
 
   return {
     word,
-    meaning,
+    meaning: meaning ?? `${word}（先听读音）`,
     example: pickExample(enPage, word),
     phonetic: pickPhonetic(enPage),
   };
 }
 
-/** 先用家长写过的词卡，没有再用网上查到的解释，并记在本机。 */
+/** 先用本地词卡（含词形还原），没有再上网查；查失败也要能听读音。 */
 export async function resolveSense(word: string): Promise<GlossaryEntry> {
   const local = lookupGlossary(word);
   if (local) return local;

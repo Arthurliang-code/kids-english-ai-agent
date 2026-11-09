@@ -37,8 +37,8 @@ export function ImageStage({ src, words, selectedId, filter, onSelect }: ImageSt
               className={`word-box${selected ? ' is-selected' : ''}`}
               vectorEffect="non-scaling-stroke"
               onPointerDown={(event) => {
-                event.preventDefault();
                 onSelect(word);
+                event.preventDefault();
               }}
             >
               <title>{word.text}</title>
