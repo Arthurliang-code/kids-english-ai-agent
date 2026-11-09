@@ -21,7 +21,7 @@ function fnv(text: string): string {
   return (hash >>> 0).toString(16);
 }
 
-/** 构建结束后写出 sw.js。新版本安装后等待，直到页面点「点一下更新」。 */
+/** 构建结束后写出 sw.js。页面走网络优先，模型等静态资源仍可离线。 */
 export function pwaPlugin(distDir: string): Plugin {
   let base = '/';
   return {
@@ -33,7 +33,7 @@ export function pwaPlugin(distDir: string): Plugin {
     closeBundle() {
       const files = walk(distDir)
         .map((full) => relative(distDir, full).split(sep).join('/'))
-        .filter((file) => file !== 'sw.js')
+        .filter((file) => file !== 'sw.js' && file !== '.nojekyll')
         .sort();
       const urls = [...new Set([base, ...files.map((file) => `${base}${file}`)])];
       const indexUrl = `${base}index.html`;
@@ -42,7 +42,11 @@ export function pwaPlugin(distDir: string): Plugin {
 const ASSETS=${JSON.stringify(urls)};
 const INDEX=${JSON.stringify(indexUrl)};
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    await cache.addAll(ASSETS);
+    await self.skipWaiting();
+  })());
 });
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
@@ -54,23 +58,25 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || event.request.method !== 'GET') return;
+  if (url.pathname.endsWith('/sw.js')) return;
+  const isPage = event.request.mode === 'navigate' || url.pathname.endsWith('/') || url.pathname.endsWith('.html');
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
+    if (isPage) {
+      try {
+        const fresh = await fetch(event.request, { cache: 'no-store' });
+        cache.put(INDEX, fresh.clone());
+        return fresh;
+      } catch (error) {
+        return (await cache.match(event.request, { ignoreSearch: true })) || (await cache.match(INDEX)) || Promise.reject(error);
+      }
+    }
     const cached = await cache.match(event.request, { ignoreSearch: true });
     if (cached) return cached;
-    try {
-      return await fetch(event.request);
-    } catch (error) {
-      if (event.request.mode === 'navigate') {
-        const fallback = await cache.match(INDEX);
-        if (fallback) return fallback;
-      }
-      throw error;
-    }
+    const response = await fetch(event.request);
+    cache.put(event.request, response.clone());
+    return response;
   })());
-});
-self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'skip-waiting') self.skipWaiting();
 });
 `;
       writeFileSync(join(distDir, 'sw.js'), source);
