@@ -9,3 +9,4 @@ test-data/
 !test-data/README.md
 /chi_sim.traineddata
 /eng.traineddata
+scripts/.cache/

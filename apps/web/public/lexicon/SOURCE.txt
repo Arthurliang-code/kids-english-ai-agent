@@ -1,0 +1,4 @@
+zh-senses.json.gz is a compact subset of ECDICT
+https://github.com/skywind3000/ECDICT
+Copyright (c) skywind3000
+MIT License

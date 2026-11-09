@@ -10,6 +10,7 @@
     "dev": "npm run dev --workspace apps/web",
     "build": "npm run build --workspace apps/web",
     "preview": "npm run preview --workspace apps/web",
-    "typecheck": "npm run typecheck --workspace apps/web"
+    "typecheck": "npm run typecheck --workspace apps/web",
+    "build:zh-dict": "python3 scripts/build-zh-dict.py"
   }
 }
