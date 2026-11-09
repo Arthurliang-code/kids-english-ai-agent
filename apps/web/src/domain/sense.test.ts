@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  fallbackExample,
   formatKidExample,
   formatKidMeaning,
   lookupZhSense,
@@ -49,6 +50,13 @@ test('戏剧义的英文释义不会拿来当例句', () => {
     'n. a dramatic work intended for performance by actors on a stage\\nn. a theatrical performance of a drama\\nn. a preset plan of action in team sports',
   );
   assert.equal(example, '');
+});
+
+test('没有英文例句时用中文义项造句，不用 This is', () => {
+  assert.equal(fallbackExample('play', '游戏；玩'), 'Play means 游戏.');
+  const merged = mergeSenses('play', null, { meaning: '游戏；玩', example: '' });
+  assert.equal(merged.example, 'Play means 游戏.');
+  assert.doesNotMatch(merged.example, /This is/i);
 });
 
 test('词卡和词典能拼成更丰富的解释和例句', () => {

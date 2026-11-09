@@ -44,7 +44,7 @@ export function WordCard({ text, trusted }: WordCardProps) {
               .catch(() => ({
                 word: text,
                 meaning: `${text}（先听读音）`,
-                example: `This is ${text}.`,
+                example: `Let's read "${text}".`,
               }))
           : Promise.resolve(null),
       ]);

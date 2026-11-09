@@ -3,7 +3,7 @@ const POS = /^[a-zA-Z]{1,8}\.\s*/;
 const JUNK =
   /家伙|复数|分词|过去式|赌博|分队|部队|帐簿|名册|工作簿|神父|玩笑|游玩|跳动|假装|开玩笑|传摇曳|演戏|扮演|\.\.\.|…|^当.+的/;
 const BAD_EN =
-  /drama|theatrical|priest|church|trinity|\bgod\b|military|legal|medicine|vulgar|slang|computer|sexual|obsolete|baseball|binary compound|empedocles|mentally and emotionally|playing cards|card game|preset plan|feasible|organization regarded|eurasian|widely cultivated|distinguished position/i;
+  /drama|theatrical|priest|church|trinity|\bgod\b|military|legal|medicine|vulgar|slang|computer|sexual|obsolete|baseball|binary compound|empedocles|mentally and emotionally|playing cards|card game|preset plan|feasible|organization regarded|eurasian|widely cultivated|distinguished position|letter of the|roman alphabet|hebrew alphabet|blood group|associate degree|united nations|possessive case|personal pronoun|cardinal number|objective case|definite article|auxiliary verb/i;
 const NICE_EN =
   /\b(game|child|school|friend|family|fruit|water|book|home|play|happy|mother|father|together|run|read|like|parent|pages|company|liquid|joy|pleasure|foot)\b/i;
 
@@ -65,6 +65,7 @@ function shorten(text: string, max = 72): string {
 }
 
 function toSentence(word: string, raw: string): string | null {
+  const pos = /^(n|v|vt|vi|a|adj)\./i.exec(raw)?.[1]?.toLowerCase();
   const text = shorten(raw.replace(POS, '').replace(/\[[^\]]*\]/g, '').replace(/[。．]/g, '').trim());
   if (!text || text.length < 8 || !/[a-zA-Z]/.test(text)) return null;
   const display = word.charAt(0).toUpperCase() + word.slice(1);
@@ -74,7 +75,18 @@ function toSentence(word: string, raw: string): string | null {
     if (!rest || /^be\s/i.test(rest)) return `${display} means ${text}.`;
     return `I ${rest}.`;
   }
+  if (pos === 'n' || pos === 'a' || pos === 'adj') {
+    const article = /^[aeiou]/i.test(text) ? 'an' : 'a';
+    return `${display} is ${article} ${text}.`;
+  }
   return `${display} means ${text}.`;
+}
+
+export function fallbackExample(word: string, meaning: string): string {
+  const gloss = splitSenses(meaning).find((item) => /[\u4e00-\u9fff]/.test(item) && !item.includes('先听读音'));
+  const display = word.charAt(0).toUpperCase() + word.slice(1);
+  if (gloss) return `${display} means ${gloss}.`;
+  return `Let's read "${word}".`;
 }
 
 function scoreEnglish(text: string): number {
@@ -138,7 +150,7 @@ export function mergeSenses(
   return {
     word,
     meaning: meanings.join('；') || `${word}（先听读音）`,
-    example: examples.join('\n') || `This is ${word}.`,
+    example: examples.join('\n') || fallbackExample(word, meanings.join('；')),
     phonetic: primary?.phonetic || extra?.phonetic,
   };
 }

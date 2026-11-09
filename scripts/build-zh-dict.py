@@ -22,7 +22,7 @@ JUNK = re.compile(
     r"家伙|复数|分词|过去式|赌博|分队|部队|帐簿|名册|工作簿|神父|玩笑|游玩|跳动|假装|开玩笑|传摇曳|演戏|扮演|\.\.\.|…|^当.+的"
 )
 BAD_EN = re.compile(
-    r"drama|theatrical|priest|church|trinity|\bgod\b|military|legal|medicine|vulgar|slang|computer|sexual|obsolete|baseball|binary compound|empedocles|mentally and emotionally|playing cards|card game|preset plan|feasible|organization regarded|eurasian|widely cultivated|distinguished position",
+    r"drama|theatrical|priest|church|trinity|\bgod\b|military|legal|medicine|vulgar|slang|computer|sexual|obsolete|baseball|binary compound|empedocles|mentally and emotionally|playing cards|card game|preset plan|feasible|organization regarded|eurasian|widely cultivated|distinguished position|letter of the|roman alphabet|hebrew alphabet|blood group|associate degree|united nations|possessive case|personal pronoun|cardinal number|objective case|definite article|auxiliary verb",
     re.I,
 )
 NICE_EN = re.compile(
@@ -94,6 +94,8 @@ def shorten(text: str, max_len: int = 72) -> str:
 
 
 def to_sentence(word: str, raw: str) -> str | None:
+    pos_match = re.match(r"^(n|v|vt|vi|a|adj)\.", raw, re.I)
+    pos = pos_match.group(1).lower() if pos_match else ""
     text = shorten(POS.sub("", raw))
     text = re.sub(r"\[[^\]]*\]", "", text).replace("。", "").replace("．", "").strip()
     if not text or len(text) < 8 or not re.search(r"[A-Za-z]", text):
@@ -106,6 +108,9 @@ def to_sentence(word: str, raw: str) -> str | None:
         if not rest or re.match(r"^be\s", rest, re.I):
             return f"{display} means {text}."
         return f"I {rest}."
+    if pos in {"n", "a", "adj"}:
+        article = "an" if re.match(r"^[aeiou]", text, re.I) else "a"
+        return f"{display} is {article} {text}."
     return f"{display} means {text}."
 
 
@@ -123,7 +128,13 @@ def score_english(text: str) -> float:
     return score
 
 
-def kid_example(word: str, definition: str) -> str:
+def bilingual_example(word: str, meaning: str) -> str:
+    gloss = next((item.strip() for item in meaning.split("；") if item.strip()), "")
+    display = word[:1].upper() + word[1:]
+    return f"{display} means {gloss}." if gloss else f'Let\'s read "{word}".'
+
+
+def kid_example(word: str, definition: str, meaning: str) -> str:
     ranked = sorted(
         ((line, score_english(line)) for line in usable_lines(definition)),
         key=lambda item: item[1],
@@ -139,6 +150,8 @@ def kid_example(word: str, definition: str) -> str:
         out.append(sentence)
         if len(out) == 2:
             break
+    if not out:
+        out.append(bilingual_example(word, meaning))
     return "\n".join(out)
 
 
@@ -224,7 +237,7 @@ def main() -> None:
             if not meaning:
                 continue
             phonetic = (row.get("phonetic") or "").strip()
-            example = kid_example(key, row.get("definition") or "")
+            example = kid_example(key, row.get("definition") or "", meaning)
             if key not in entries:
                 entries[key] = [phonetic, meaning, example] if example else [phonetic, meaning]
             for item in exchange.split("/"):
