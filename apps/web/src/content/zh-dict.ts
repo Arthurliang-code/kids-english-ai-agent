@@ -24,7 +24,7 @@ function parseDict(text: string): ZhDict {
     dict.set(word, {
       phonetic: phonetic || undefined,
       meaning,
-      example: example || `This is ${word}.`,
+      example: example || '',
     });
   }
   return dict;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { resolveSense } from '../../content/lookup';
+import { enrichSense, resolveSense } from '../../content/lookup';
+import { splitSenses } from '../../domain/sense';
 import { getItem, getTake, putItem, putTake } from '../../data/vocab-db';
 import type { GlossaryEntry } from '../../domain/glossary';
 import { newItem, todayISO } from '../../domain/review';
@@ -32,11 +33,19 @@ export function WordCard({ text, trusted }: WordCardProps) {
         getItem(text),
         getTake(text),
         trusted
-          ? resolveSense(text).catch(() => ({
-              word: text,
-              meaning: `${text}（先听读音）`,
-              example: `This is ${text}.`,
-            }))
+          ? resolveSense(text)
+              .then(async (entry) => {
+                if (!cancelled) {
+                  setSense(entry);
+                  setLoading(false);
+                }
+                return enrichSense(entry);
+              })
+              .catch(() => ({
+                word: text,
+                meaning: `${text}（先听读音）`,
+                example: `This is ${text}.`,
+              }))
           : Promise.resolve(null),
       ]);
       if (cancelled) return;
@@ -45,7 +54,7 @@ export function WordCard({ text, trusted }: WordCardProps) {
         objectUrl = URL.createObjectURL(take);
         setTakeUrl(objectUrl);
       }
-      setSense(next);
+      if (next) setSense(next);
       setLoading(false);
     })();
     return () => {
@@ -104,9 +113,17 @@ export function WordCard({ text, trusted }: WordCardProps) {
 
       <div className="word-sense">
         <p className="word-sense-label">举例</p>
-        <p className="word-card-example">{loading ? '…' : sense?.example}</p>
+        {loading ? (
+          <p className="word-card-example">…</p>
+        ) : (
+          splitSenses(sense?.example ?? '').map((sentence) => (
+            <p className="word-card-example" key={sentence}>
+              {sentence}
+            </p>
+          ))
+        )}
         {sense?.example ? (
-          <button type="button" onClick={() => speakEnglish(sense.example)}>
+          <button type="button" onClick={() => speakEnglish(splitSenses(sense.example).join(' '))}>
             听句子
           </button>
         ) : null}

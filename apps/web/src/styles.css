@@ -969,8 +969,9 @@ button.big {
 }
 
 .word-card-example {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   font-size: 20px;
+  line-height: 1.35;
 }
 
 .word-card-actions {
