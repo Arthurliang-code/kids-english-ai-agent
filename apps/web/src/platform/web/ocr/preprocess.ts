@@ -6,6 +6,7 @@ export interface PreprocessConfig {
 
 export interface PreprocessOutput {
   canvas: HTMLCanvasElement;
+  imageBytes?: Uint8Array;
   width: number;
   height: number;
   /** 输出图相对原图的比例 */
@@ -19,6 +20,26 @@ export function loadImage(url: string): Promise<HTMLImageElement> {
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error('图片加载失败'));
     img.src = url;
+  });
+}
+
+function canvasToJpegBytes(canvas: HTMLCanvasElement, quality = 0.88): Promise<Uint8Array | undefined> {
+  if (typeof canvas.toBlob !== 'function') return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          resolve(undefined);
+          return;
+        }
+        void blob
+          .arrayBuffer()
+          .then((buffer) => resolve(new Uint8Array(buffer)))
+          .catch(() => resolve(undefined));
+      },
+      'image/jpeg',
+      quality,
+    );
   });
 }
 
@@ -47,16 +68,20 @@ export async function preprocess(
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
+
+  let usedGpuGrayscale = false;
+  if (config.grayscale && 'filter' in ctx) {
+    ctx.filter = 'grayscale(1)';
+    usedGpuGrayscale = ctx.filter === 'grayscale(1)';
+  }
+
   ctx.drawImage(img, 0, 0, width, height);
 
-  if (config.grayscale) {
+  if (config.grayscale && !usedGpuGrayscale) {
     const imageData = ctx.getImageData(0, 0, width, height);
     const pixels = imageData.data;
     for (let i = 0; i < pixels.length; i += 4) {
-      const r = pixels[i] ?? 0;
-      const g = pixels[i + 1] ?? 0;
-      const b = pixels[i + 2] ?? 0;
-      const gray = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+      const gray = (pixels[i]! * 77 + pixels[i + 1]! * 150 + pixels[i + 2]! * 29) >> 8;
       pixels[i] = gray;
       pixels[i + 1] = gray;
       pixels[i + 2] = gray;
@@ -64,8 +89,11 @@ export async function preprocess(
     ctx.putImageData(imageData, 0, 0);
   }
 
+  const imageBytes = await canvasToJpegBytes(canvas, 0.88);
+
   return {
     canvas,
+    imageBytes,
     width,
     height,
     scale,

@@ -3,9 +3,11 @@ import { useEffect, useRef, useState } from 'react';
 interface CameraSheetProps {
   open: boolean;
   onClose: () => void;
-  onCapture: (dataUrl: string, width: number, height: number) => void;
+  onCapture: (url: string, fromObjectUrl: boolean) => void;
   onPickFile?: (file: File) => void;
 }
+
+const CAPTURE_MAX_EDGE = 2048;
 
 export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraSheetProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -24,7 +26,7 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
       .getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 2560 },
+          width: { ideal: 1920 },
           height: { ideal: 1440 },
         },
         audio: false,
@@ -59,13 +61,30 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
     const video = videoRef.current;
     if (!video || video.videoWidth === 0) return;
 
+    const scale = Math.min(1, CAPTURE_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight));
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    onCapture(canvas.toDataURL('image/jpeg', 0.95), canvas.width, canvas.height);
+
+    if (typeof canvas.toBlob === 'function') {
+      canvas.toBlob(
+        (blob) => {
+          if (blob) {
+            onCapture(URL.createObjectURL(blob), true);
+          } else {
+            onCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+          }
+        },
+        'image/jpeg',
+        0.88,
+      );
+      return;
+    }
+
+    onCapture(canvas.toDataURL('image/jpeg', 0.88), false);
   };
 
   return (

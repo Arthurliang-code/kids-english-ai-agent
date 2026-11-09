@@ -9,6 +9,8 @@ export interface OcrEngineProgress {
 export interface OcrInput {
   /** 已完成预处理的识别输入图 */
   canvas: HTMLCanvasElement;
+  /** 已编码的轻量 JPEG 字节流，直传 Worker 避免触发默认的无损 PNG 压缩 */
+  imageBytes?: Uint8Array;
 }
 
 export interface OcrEngineRun {
@@ -22,6 +24,7 @@ export interface OcrEngineRun {
 export interface OcrEngine {
   readonly id: OcrEngineId;
   readonly label: string;
+  warm?(): Promise<void>;
   run(input: OcrInput, onProgress?: (p: OcrEngineProgress) => void): Promise<OcrEngineRun>;
   dispose(): Promise<void>;
 }

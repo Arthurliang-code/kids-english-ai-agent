@@ -34,3 +34,4 @@ test('expandQuad 在贴边词框上不会超出 0..1 边界', () => {
   ]);
   assert.equal(toSvgPoints(expanded), '0,0 1,0 1,1 0,1');
 });
+

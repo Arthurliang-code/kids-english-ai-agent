@@ -11,6 +11,7 @@ interface ImageStageProps {
   selectedId: string | null;
   filter: WordFilter;
   scanning?: boolean;
+  scanLabel?: string;
   onSelect: (word: OcrWord) => void;
 }
 
@@ -26,6 +27,7 @@ export function ImageStage({
   selectedId,
   filter,
   scanning = false,
+  scanLabel = '正在认字，马上就好…',
   onSelect,
 }: ImageStageProps) {
   const visible = selectVisible(words, filter);
@@ -89,7 +91,7 @@ export function ImageStage({
       {scanning ? (
         <div className="stage-scan" role="status" aria-live="polite">
           <div className="stage-scan-line" aria-hidden="true" />
-          <span className="stage-scan-pill">正在认字，马上就好…</span>
+          <span className="stage-scan-pill">{scanLabel}</span>
         </div>
       ) : null}
     </div>

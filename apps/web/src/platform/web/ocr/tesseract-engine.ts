@@ -31,88 +31,106 @@ export class TesseractEngine implements OcrEngine {
 
   private worker: TesseractWorker | null = null;
   private initPromise: Promise<void> | null = null;
+  private progressListener: ((p: OcrEngineProgress) => void) | null = null;
+
+  warm(): Promise<void> {
+    return this.ensureWorker();
+  }
 
   async run(
     input: OcrInput,
     onProgress?: (p: OcrEngineProgress) => void,
   ): Promise<OcrEngineRun> {
-    let initMs = 0;
-    if (!this.worker) {
+    this.progressListener = onProgress ?? null;
+    try {
+      let initMs = 0;
+      if (!this.worker) {
+        const started = performance.now();
+        await this.ensureWorker();
+        initMs = performance.now() - started;
+      } else {
+        await this.ensureWorker();
+      }
+
+      const worker = this.worker;
+      if (!worker) throw new Error('OCR 引擎初始化失败');
+
+      const { width, height } = input.canvas;
       const started = performance.now();
-      await this.ensureWorker(onProgress);
-      initMs = performance.now() - started;
-    } else {
-      await this.ensureWorker(onProgress);
-    }
+      const imagePayload = input.imageBytes ?? input.canvas;
+      const { data } = await worker.recognize(
+        imagePayload as unknown as HTMLCanvasElement,
+        {},
+        { text: true, blocks: true },
+      );
+      const recognizeMs = performance.now() - started;
 
-    const worker = this.worker;
-    if (!worker) throw new Error('OCR 引擎初始化失败');
+      const words: OcrWord[] = [];
+      const lines: OcrLine[] = [];
+      let filteredCount = 0;
 
-    const { width, height } = input.canvas;
-    const started = performance.now();
-    const { data } = await worker.recognize(input.canvas, {}, { text: true, blocks: true });
-    const recognizeMs = performance.now() - started;
+      for (const block of data.blocks ?? []) {
+        for (const paragraph of block.paragraphs) {
+          for (const line of paragraph.lines) {
+            const lineId = `l${lines.length}`;
+            let indexInLine = 0;
 
-    const words: OcrWord[] = [];
-    const lines: OcrLine[] = [];
-    let filteredCount = 0;
-
-    for (const block of data.blocks ?? []) {
-      for (const paragraph of block.paragraphs) {
-        for (const line of paragraph.lines) {
-          const lineId = `l${lines.length}`;
-          let indexInLine = 0;
-
-          lines.push({
-            id: lineId,
-            text: line.text,
-            confidence: line.confidence / 100,
-            quad: rectToQuad(line.bbox, width, height),
-          });
-
-          for (const word of line.words) {
-            const normalized = normalizeEnglishToken(word.text);
-            if (!normalized) {
-              if (word.text.trim().length > 0) filteredCount += 1;
-              continue;
-            }
-
-            words.push({
-              id: `${lineId}-w${indexInLine}`,
-              text: normalized,
-              confidence: Math.max(0, Math.min(1, word.confidence / 100)),
-              quad: rectToQuad(word.bbox, width, height),
-              lineId,
-              indexInLine,
-              lexiconHit: false,
-              bbox: word.bbox,
+            lines.push({
+              id: lineId,
+              text: line.text,
+              confidence: line.confidence / 100,
+              quad: rectToQuad(line.bbox, width, height),
             });
-            indexInLine += 1;
+
+            for (const word of line.words) {
+              const normalized = normalizeEnglishToken(word.text);
+              if (!normalized) {
+                if (word.text.trim().length > 0) filteredCount += 1;
+                continue;
+              }
+
+              words.push({
+                id: `${lineId}-w${indexInLine}`,
+                text: normalized,
+                confidence: Math.max(0, Math.min(1, word.confidence / 100)),
+                quad: rectToQuad(word.bbox, width, height),
+                lineId,
+                indexInLine,
+                lexiconHit: false,
+                bbox: word.bbox,
+              });
+              indexInLine += 1;
+            }
           }
         }
       }
+
+      const result: OcrResult = {
+        engine: this.id,
+        engineVersion: data.version,
+        words,
+        lines,
+        rawText: data.text,
+        image: { width, height },
+        filteredCount,
+      };
+
+      return { result, recognizeMs, initMs };
+    } finally {
+      if (this.progressListener === onProgress) {
+        this.progressListener = null;
+      }
     }
-
-    const result: OcrResult = {
-      engine: this.id,
-      engineVersion: data.version,
-      words,
-      lines,
-      rawText: data.text,
-      image: { width, height },
-      filteredCount,
-    };
-
-    return { result, recognizeMs, initMs };
   }
 
   async dispose(): Promise<void> {
+    this.progressListener = null;
     await this.worker?.terminate();
     this.worker = null;
     this.initPromise = null;
   }
 
-  private ensureWorker(onProgress?: (p: OcrEngineProgress) => void): Promise<void> {
+  private ensureWorker(): Promise<void> {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
@@ -122,7 +140,7 @@ export class TesseractEngine implements OcrEngine {
         langPath: `${ASSET_BASE}/tessdata`,
         gzip: true,
         logger: (message) => {
-          onProgress?.({
+          this.progressListener?.({
             status: message.status,
             progress: Math.max(0, Math.min(1, message.progress)),
           });

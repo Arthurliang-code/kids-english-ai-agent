@@ -16,15 +16,16 @@ type RunStatus = 'idle' | 'running' | 'done' | 'error';
 
 interface Source {
   url: string;
-  width: number;
-  height: number;
   fromObjectUrl: boolean;
 }
+
+const OCR_MAX_EDGE = 1600;
 
 export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }) {
   const [source, setSource] = useState<Source | null>(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [status, setStatus] = useState<RunStatus>('idle');
+  const [scanLabel, setScanLabel] = useState('正在认字，马上就好…');
   const [result, setResult] = useState<OcrResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<OcrWord | null>(null);
@@ -33,8 +34,13 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
   const runId = useRef(0);
 
   useEffect(() => {
+    const engine = new TesseractEngine();
+    engineRef.current = engine;
+    void engine.warm?.();
+    void loadLexicon();
     return () => {
-      void engineRef.current?.dispose();
+      void engine.dispose();
+      engineRef.current = null;
     };
   }, []);
 
@@ -44,21 +50,37 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     };
   }, [source]);
 
-  const recognize = async (next: Source) => {
+  const applyImage = useCallback(async (url: string, fromObjectUrl: boolean) => {
     const id = ++runId.current;
+    setSource({ url, fromObjectUrl });
     setStatus('running');
+    setScanLabel('正在认字…');
     setError(null);
     setResult(null);
     setSelected(null);
 
     try {
-      const image = await loadImage(next.url);
-      const pre = await preprocess(image, { maxEdge: 2048, grayscale: true });
-      const engine = (engineRef.current ??= new TesseractEngine());
-      const run = await engine.run({ canvas: pre.canvas });
+      const [image, lexicon] = await Promise.all([loadImage(url), loadLexicon()]);
       if (id !== runId.current) return;
 
-      const lexicon = await loadLexicon();
+      const pre = await preprocess(image, { maxEdge: OCR_MAX_EDGE, grayscale: true });
+      if (id !== runId.current) return;
+
+      const engine = (engineRef.current ??= new TesseractEngine());
+      const run = await engine.run(
+        { canvas: pre.canvas, imageBytes: pre.imageBytes },
+        (progress) => {
+          if (id !== runId.current) return;
+          if (progress.status === 'recognizing text') {
+            const pct = Math.round(progress.progress * 100);
+            setScanLabel(pct > 0 ? `正在认字 ${pct}%…` : '正在认字…');
+          } else {
+            setScanLabel('正在准备认字引擎…');
+          }
+        },
+      );
+      if (id !== runId.current) return;
+
       const words = run.result.words.map((word) => ({
         ...word,
         lexiconHit: lookupWord(lexicon, word.text),
@@ -70,22 +92,15 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       setError('这一页看不清，再拍一次吧。');
       setStatus('error');
     }
-  };
-
-  const applyImage = useCallback(async (url: string, fromObjectUrl: boolean) => {
-    const image = await loadImage(url);
-    const next = { url, width: image.naturalWidth, height: image.naturalHeight, fromObjectUrl };
-    setSource(next);
-    await recognize(next);
   }, []);
 
   const handleFile = async (file: File) => {
     await applyImage(URL.createObjectURL(file), true);
   };
 
-  const handleCapture = async (dataUrl: string) => {
+  const handleCapture = async (url: string, fromObjectUrl: boolean) => {
     setCameraOpen(false);
-    await applyImage(dataUrl, false);
+    await applyImage(url, fromObjectUrl);
   };
 
   const handleSelect = useCallback((word: OcrWord) => {
@@ -134,6 +149,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
                     selectedId={selected?.id ?? null}
                     filter="trusted"
                     scanning={status === 'running'}
+                    scanLabel={scanLabel}
                     onSelect={handleSelect}
                   />
                   {status === 'done' && trustedCount > 0 && !selected ? (
@@ -216,7 +232,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       <CameraSheet
         open={cameraOpen}
         onClose={() => setCameraOpen(false)}
-        onCapture={(url) => void handleCapture(url)}
+        onCapture={(url, fromObjectUrl) => void handleCapture(url, fromObjectUrl)}
         onPickFile={(file) => void handleFile(file)}
       />
     </div>
