@@ -65,7 +65,7 @@ export function ReviewPanel() {
         ) : current ? (
           <>
             <p className="review-count">今天还有 {queue.length} 个</p>
-            <WordCard text={current.word} trusted />
+            <WordCard text={current.word} trusted mode="review" />
             <div className="word-card-actions">
               <button className="kid-listen" type="button" onClick={() => void mark(true)}>
                 会了

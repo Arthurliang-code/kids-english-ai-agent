@@ -4,9 +4,10 @@ interface CameraSheetProps {
   open: boolean;
   onClose: () => void;
   onCapture: (dataUrl: string, width: number, height: number) => void;
+  onPickFile?: (file: File) => void;
 }
 
-export function CameraSheet({ open, onClose, onCapture }: CameraSheetProps) {
+export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraSheetProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
@@ -42,7 +43,7 @@ export function CameraSheet({ open, onClose, onCapture }: CameraSheetProps) {
       })
       .catch(() => {
         if (cancelled) return;
-        setError('打不开相机，去相册里选一张吧。');
+        setError('打不开相机，可以直接从相册里选一张。');
       });
 
     return () => {
@@ -68,24 +69,53 @@ export function CameraSheet({ open, onClose, onCapture }: CameraSheetProps) {
   };
 
   return (
-    <div className="sheet-backdrop" role="dialog" aria-modal="true">
+    <div className="sheet-backdrop" role="dialog" aria-modal="true" aria-labelledby="camera-sheet-title">
       <div className="sheet">
         <div className="sheet-head">
-          <span>把书放进框里</span>
-          <button className="ghost" onClick={onClose}>
+          <span id="camera-sheet-title">把书放平，对齐四角框框</span>
+          <button className="ghost" type="button" onClick={onClose}>
             返回
           </button>
         </div>
 
         <div className="video-wrap">
           <video ref={videoRef} playsInline muted autoPlay />
+          {live ? (
+            <div className="camera-guide" aria-hidden="true">
+              <span className="corner tl" />
+              <span className="corner tr" />
+              <span className="corner bl" />
+              <span className="corner br" />
+            </div>
+          ) : null}
           {!live && !error && <div className="video-hint">正在打开相机…</div>}
-          {error && <div className="video-hint error">{error}</div>}
+          {error && (
+            <div className="video-hint error">
+              <p>{error}</p>
+              {onPickFile ? (
+                <label className="kid-album">
+                  从相册选一张
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = '';
+                      if (file) {
+                        onClose();
+                        onPickFile(file);
+                      }
+                    }}
+                  />
+                </label>
+              ) : null}
+            </div>
+          )}
         </div>
 
         <div className="sheet-foot">
-          <button className="primary big" onClick={handleCapture} disabled={!live}>
-            拍下这一页
+          <button className="primary big" type="button" onClick={handleCapture} disabled={!live}>
+            📷 拍下这一页
           </button>
         </div>
       </div>

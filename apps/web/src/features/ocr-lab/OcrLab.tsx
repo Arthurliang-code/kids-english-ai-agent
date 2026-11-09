@@ -94,99 +94,131 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     speakEnglish(word.text);
   }, []);
 
+  const trustedCount = result?.words.filter(isTrusted).length ?? 0;
+
   return (
     <div className="app">
       {onApplyUpdate ? <UpdateBanner onUpdate={onApplyUpdate} /> : null}
       <header className="kid-bar">
-        <button type="button" className={view === 'read' ? 'active' : ''} onClick={() => setView('read')}>
-          点读
-        </button>
-        <button type="button" className={view === 'review' ? 'active' : ''} onClick={() => setView('review')}>
-          复习
-        </button>
+        <nav className="kid-nav" aria-label="功能切换">
+          <button
+            type="button"
+            className={view === 'read' ? 'active' : ''}
+            aria-pressed={view === 'read'}
+            onClick={() => setView('read')}
+          >
+            📖 点读
+          </button>
+          <button
+            type="button"
+            className={view === 'review' ? 'active' : ''}
+            aria-pressed={view === 'review'}
+            onClick={() => setView('review')}
+          >
+            ⭐ 复习
+          </button>
+        </nav>
       </header>
 
-      {view === 'review' ? <ReviewPanel /> : null}
+      <main className="app-main">
+        {view === 'review' ? <ReviewPanel /> : null}
 
-      <div className="kid-read" hidden={view !== 'read'}>
-        {source ? (
-          <div className="kid-page">
-            <ImageStage
-              src={source.url}
-              words={result?.words ?? []}
-              selectedId={selected?.id ?? null}
-              filter="trusted"
-              onSelect={handleSelect}
-            />
-            {status === 'running' ? <p className="kid-status">正在认字…</p> : null}
-            {error ? <p className="kid-alert">{error}</p> : null}
-            {status === 'done' && (result?.words.filter(isTrusted).length ?? 0) === 0 ? (
-              <p className="kid-alert">没有认出能读的词，把书放平再拍一次。</p>
-            ) : null}
-          </div>
-        ) : (
-          <div className="kid-home">
-            <p className="kid-hello">把课本对着平板</p>
-            <button className="kid-camera" type="button" onClick={() => setCameraOpen(true)}>
-              拍一页
-            </button>
-            <label className="kid-album">
-              从相册选
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.target.value = '';
-                  if (file) void handleFile(file);
-                }}
-              />
-            </label>
-            <button
-              className="kid-sample"
-              type="button"
-              onClick={() =>
-                void applyImage(`${import.meta.env.BASE_URL}samples/sample-page.png`, false)
-              }
-            >
-              看一页例子
-            </button>
-          </div>
-        )}
+        <div className="kid-read" hidden={view !== 'read'}>
+          {source ? (
+            <div className={`kid-workspace${selected ? ' has-selection' : ''}`}>
+              <div className="kid-stage-area">
+                <div className="kid-page">
+                  <ImageStage
+                    src={source.url}
+                    words={result?.words ?? []}
+                    selectedId={selected?.id ?? null}
+                    filter="trusted"
+                    scanning={status === 'running'}
+                    onSelect={handleSelect}
+                  />
+                  {status === 'done' && trustedCount > 0 && !selected ? (
+                    <p className="kid-tip">👆 点一页里的绿色词框，听读音、看解释</p>
+                  ) : null}
+                  {error ? <p className="kid-alert">{error}</p> : null}
+                  {status === 'done' && trustedCount === 0 ? (
+                    <p className="kid-alert">没有认出能读的词，把书放平再拍一次。</p>
+                  ) : null}
+                </div>
 
-        {source ? (
-          <div className="kid-dock">
-            <button className="kid-camera small" type="button" onClick={() => setCameraOpen(true)}>
-              再拍一页
-            </button>
-            <label className="kid-album">
-              换一张
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.target.value = '';
-                  if (file) void handleFile(file);
-                }}
-              />
-            </label>
-          </div>
-        ) : null}
-      </div>
+                <div className="kid-dock">
+                  <button
+                    className="kid-camera small"
+                    type="button"
+                    onClick={() => setCameraOpen(true)}
+                  >
+                    📷 再拍一页
+                  </button>
+                  <label className="kid-album">
+                    🖼️ 换一张
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = '';
+                        if (file) void handleFile(file);
+                      }}
+                    />
+                  </label>
+                </div>
+              </div>
 
-      {selected ? (
-        <div className="kid-sheet-backdrop" onClick={() => setSelected(null)}>
-          <div className="kid-sheet" onClick={(event) => event.stopPropagation()}>
-            <WordCard text={selected.text} trusted />
-            <button className="kid-close" type="button" onClick={() => setSelected(null)}>
-              好了
-            </button>
-          </div>
+              {selected ? (
+                <aside className="kid-card-panel" aria-label="单词卡片">
+                  <div className="kid-sheet">
+                    <WordCard
+                      text={selected.text}
+                      trusted
+                      mode="lookup"
+                      onClose={() => setSelected(null)}
+                    />
+                  </div>
+                </aside>
+              ) : null}
+            </div>
+          ) : (
+            <div className="kid-home">
+              <p className="kid-hello">把课本对着平板</p>
+              <button className="kid-camera" type="button" onClick={() => setCameraOpen(true)}>
+                📷 拍一页
+              </button>
+              <label className="kid-album">
+                🖼️ 从相册选
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = '';
+                    if (file) void handleFile(file);
+                  }}
+                />
+              </label>
+              <button
+                className="kid-sample"
+                type="button"
+                onClick={() =>
+                  void applyImage(`${import.meta.env.BASE_URL}samples/sample-page.png`, false)
+                }
+              >
+                看一页例子
+              </button>
+            </div>
+          )}
         </div>
-      ) : null}
+      </main>
 
-      <CameraSheet open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={(url) => void handleCapture(url)} />
+      <CameraSheet
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onCapture={(url) => void handleCapture(url)}
+        onPickFile={(file) => void handleFile(file)}
+      />
     </div>
   );
 }
