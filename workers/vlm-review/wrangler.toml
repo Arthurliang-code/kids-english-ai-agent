@@ -1,0 +1,9 @@
+name = "kea-vlm-review"
+main = "index.ts"
+compatibility_date = "2026-11-09"
+
+# 密钥不要写进这个文件。在本目录执行：
+# npx wrangler secret put DEEPSEEK_API_KEY
+[vars]
+VLM_MODEL = "deepseek-flash"
+VLM_BASE_URL = "https://api.deepseek.com"
