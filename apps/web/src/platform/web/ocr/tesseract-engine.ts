@@ -6,11 +6,72 @@ import { normalizeEnglishToken } from '../../../domain/text';
 
 /**
  * 静态资源放在 public/tesseract，避免依赖 jsdelivr 等境外 CDN。
- * 引擎固定 LSTM。2026 年的 iPad Safari 会选 relaxed SIMD 这套内核，
- * 所以直接指向该文件，页面只下载这一套，不再带上其余变体。
+ *
+ * 兼容与稳定性设计（尤其针对 iPad Safari / WebKit）：
+ * 1. iPadOS < 18.2 的 WebKit 不支持 WebAssembly Relaxed SIMD，硬编码 relaxedsimd
+ *    会导致 WebAssembly.CompileError，且 tesseract.js 内部 createWorker.js 末尾
+ *    `.catch(() => {})` 会吞掉异常，导致 Promise 永远挂起、界面一直停在“正在认字…”。
+ *    因此按运行时能力探测并按候选链自动降级：
+ *    - 桌面端优先 relaxedsimd -> simd -> 基础 lstm
+ *    - iPadOS / iOS 端优先标准 128-bit simd -> 基础 lstm
+ * 2. 设 `workerBlobURL: false` 直接加载同源 `/tesseract/worker.min.js`，避开 iPad PWA
+ *    下 `blob:` Worker 拦截与相对路径问题。
+ * 3. 设 `cacheMethod: 'none'` 禁用 Worker 内 `idb-keyval` IndexedDB 读写，交由
+ *    Service Worker Cache Storage 持久缓存 `eng.traineddata.gz`，避免 iPad WebKit
+ *    Worker 内 IndexedDB 锁死或读出旧版不兼容缓存。
  */
 const ASSET_BASE = `${import.meta.env.BASE_URL}tesseract`;
-const CORE_FILE = `${ASSET_BASE}/tesseract-core-relaxedsimd-lstm.wasm.js`;
+const WORKER_INIT_TIMEOUT_MS = 20_000;
+const RECOGNIZE_TIMEOUT_MS = 30_000;
+
+/** wasm-feature-detect 标准探测字节码 */
+const RELAXED_SIMD_WASM = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 1, 253,
+  15, 65, 2, 253, 15, 253, 128, 2, 11,
+]);
+const SIMD_WASM = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15,
+  253, 98, 11,
+]);
+
+function isAppleTouchDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
+}
+
+function getCoreCandidates(): string[] {
+  const candidates: string[] = [];
+  const canValidate =
+    typeof WebAssembly === 'object' && typeof WebAssembly.validate === 'function';
+
+  if (canValidate && !isAppleTouchDevice() && WebAssembly.validate(RELAXED_SIMD_WASM)) {
+    candidates.push(`${ASSET_BASE}/tesseract-core-relaxedsimd-lstm.wasm.js`);
+  }
+  if (canValidate && WebAssembly.validate(SIMD_WASM)) {
+    candidates.push(`${ASSET_BASE}/tesseract-core-simd-lstm.wasm.js`);
+  }
+  candidates.push(`${ASSET_BASE}/tesseract-core-lstm.wasm.js`);
+  return candidates;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 function rectToQuad(box: PixelBox, width: number, height: number): Quad {
   const x0 = box.x0 / width;
@@ -34,7 +95,7 @@ export class TesseractEngine implements OcrEngine {
   private progressListener: ((p: OcrEngineProgress) => void) | null = null;
 
   warm(): Promise<void> {
-    return this.ensureWorker();
+    return this.ensureWorker().catch(() => undefined);
   }
 
   async run(
@@ -58,11 +119,22 @@ export class TesseractEngine implements OcrEngine {
       const { width, height } = input.canvas;
       const started = performance.now();
       const imagePayload = input.imageBytes ?? input.canvas;
-      const { data } = await worker.recognize(
-        imagePayload as unknown as HTMLCanvasElement,
-        {},
-        { text: true, blocks: true },
-      );
+      let data: Awaited<ReturnType<TesseractWorker['recognize']>>['data'];
+      try {
+        const response = await withTimeout(
+          worker.recognize(
+            imagePayload as unknown as HTMLCanvasElement,
+            {},
+            { text: true, blocks: true },
+          ),
+          RECOGNIZE_TIMEOUT_MS,
+          'OCR 识别超时',
+        );
+        data = response.data;
+      } catch (error) {
+        await this.dispose();
+        throw error;
+      }
       const recognizeMs = performance.now() - started;
 
       const words: OcrWord[] = [];
@@ -130,14 +202,14 @@ export class TesseractEngine implements OcrEngine {
     this.initPromise = null;
   }
 
-  private ensureWorker(): Promise<void> {
-    if (this.initPromise) return this.initPromise;
-
-    this.initPromise = (async () => {
-      const worker = await Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
+  private createWorkerForCore(coreFile: string): Promise<TesseractWorker> {
+    const createPromise = new Promise<TesseractWorker>((resolve, reject) => {
+      void Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
         workerPath: `${ASSET_BASE}/worker.min.js`,
-        corePath: CORE_FILE,
+        corePath: coreFile,
         langPath: `${ASSET_BASE}/tessdata`,
+        workerBlobURL: false,
+        cacheMethod: 'none',
         gzip: true,
         logger: (message) => {
           this.progressListener?.({
@@ -145,16 +217,39 @@ export class TesseractEngine implements OcrEngine {
             progress: Math.max(0, Math.min(1, message.progress)),
           });
         },
-      });
+        errorHandler: (err) => {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      }).then(resolve, reject);
+    });
 
-      await worker.setParameters({
-        // 试卷/绘本照片是稀疏排版，稀疏模式明显优于默认自动分页
-        tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-      });
+    return withTimeout(createPromise, WORKER_INIT_TIMEOUT_MS, 'OCR 引擎初始化超时');
+  }
 
-      this.worker = worker;
+  private ensureWorker(): Promise<void> {
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      const candidates = getCoreCandidates();
+      let lastError: unknown = null;
+
+      for (const coreFile of candidates) {
+        try {
+          const worker = await this.createWorkerForCore(coreFile);
+          await worker.setParameters({
+            // 试卷/绘本照片是稀疏排版，稀疏模式明显优于默认自动分页
+            tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
+            preserve_interword_spaces: '1',
+            user_defined_dpi: '300',
+          });
+          this.worker = worker;
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      throw lastError instanceof Error ? lastError : new Error('OCR 引擎初始化失败');
     })();
 
     this.initPromise.catch(() => {

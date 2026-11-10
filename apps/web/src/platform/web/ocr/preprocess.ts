@@ -17,7 +17,16 @@ export interface PreprocessOutput {
 export function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
+    img.onload = () => {
+      if (typeof img.decode === 'function') {
+        void img
+          .decode()
+          .catch(() => undefined)
+          .then(() => resolve(img));
+      } else {
+        resolve(img);
+      }
+    };
     img.onerror = () => reject(new Error('图片加载失败'));
     img.src = url;
   });
@@ -26,20 +35,33 @@ export function loadImage(url: string): Promise<HTMLImageElement> {
 function canvasToJpegBytes(canvas: HTMLCanvasElement, quality = 0.88): Promise<Uint8Array | undefined> {
   if (typeof canvas.toBlob !== 'function') return Promise.resolve(undefined);
   return new Promise((resolve) => {
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) {
-          resolve(undefined);
-          return;
-        }
-        void blob
-          .arrayBuffer()
-          .then((buffer) => resolve(new Uint8Array(buffer)))
-          .catch(() => resolve(undefined));
-      },
-      'image/jpeg',
-      quality,
-    );
+    let settled = false;
+    const finish = (value: Uint8Array | undefined) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(undefined), 1500);
+
+    try {
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            finish(undefined);
+            return;
+          }
+          void blob
+            .arrayBuffer()
+            .then((buffer) => finish(new Uint8Array(buffer)))
+            .catch(() => finish(undefined));
+        },
+        'image/jpeg',
+        quality,
+      );
+    } catch {
+      finish(undefined);
+    }
   });
 }
 
@@ -68,16 +90,9 @@ export async function preprocess(
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-
-  let usedGpuGrayscale = false;
-  if (config.grayscale && 'filter' in ctx) {
-    ctx.filter = 'grayscale(1)';
-    usedGpuGrayscale = ctx.filter === 'grayscale(1)';
-  }
-
   ctx.drawImage(img, 0, 0, width, height);
 
-  if (config.grayscale && !usedGpuGrayscale) {
+  if (config.grayscale) {
     const imageData = ctx.getImageData(0, 0, width, height);
     const pixels = imageData.data;
     for (let i = 0; i < pixels.length; i += 4) {

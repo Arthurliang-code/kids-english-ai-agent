@@ -55,7 +55,7 @@ export function pwaPlugin(distDir: string): Plugin {
       );
       const indexUrl = `${base}index.html`;
       const appCache = `kea-app-${fnv(shellUrls.join('\n'))}`;
-      const staticCache = 'kea-static-v2';
+      const staticCache = 'kea-static-v3';
       const source = `const APP_CACHE=${JSON.stringify(appCache)};
 const STATIC_CACHE=${JSON.stringify(staticCache)};
 const SHELL_ASSETS=${JSON.stringify(shellUrls)};
