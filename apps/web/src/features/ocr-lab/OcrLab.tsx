@@ -8,7 +8,14 @@ import type { OcrEngine } from '../../platform/core/types';
 import { loadImage, preprocess } from '../../platform/web/ocr/preprocess';
 import { TesseractEngine } from '../../platform/web/ocr/tesseract-engine';
 import { UpdateBanner } from '../../pwa/UpdateBanner';
-import { speakEnglish, speakSentence, stopSpeaking } from '../../speech/speak';
+import {
+  getPreferredAccent,
+  setPreferredAccent,
+  speakEnglish,
+  speakSentence,
+  stopSpeaking,
+  type EnglishAccent,
+} from '../../speech/speak';
 import { ReviewPanel } from '../review/ReviewPanel';
 import { CameraSheet } from './CameraSheet';
 import { ImageStage, type StageInteractionMode } from './ImageStage';
@@ -32,6 +39,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
   const [result, setResult] = useState<OcrResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stageMode, setStageMode] = useState<StageInteractionMode>('word');
+  const [accent, setAccent] = useState<EnglishAccent>(() => getPreferredAccent());
   const [selected, setSelected] = useState<OcrWord | null>(null);
   const [selectedSentence, setSelectedSentence] = useState<OcrSentence | null>(null);
   const [speakingWordIndex, setSpeakingWordIndex] = useState<number | null>(null);
@@ -143,23 +151,35 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     return activeSentence.wordIds[speakingWordIndex] ?? null;
   }, [activeSentence, speakingWordIndex]);
 
-  const handleSelectWord = useCallback((word: OcrWord) => {
-    if (!isTrusted(word)) return;
-    setSpeakingWordIndex(null);
-    setSelectedSentence(null);
-    setSelected(word);
-    speakEnglish(word.text);
+  const handleChangeAccent = useCallback((nextAccent: EnglishAccent) => {
+    setPreferredAccent(nextAccent);
+    setAccent(nextAccent);
   }, []);
 
-  const handleSelectSentence = useCallback((sentence: OcrSentence) => {
-    if (!sentence.trusted) return;
-    setSelected(null);
-    setSelectedSentence(sentence);
-    speakSentence(sentence.text, {
-      slow: false,
-      onWordIndex: setSpeakingWordIndex,
-    });
-  }, []);
+  const handleSelectWord = useCallback(
+    (word: OcrWord) => {
+      if (!isTrusted(word)) return;
+      setSpeakingWordIndex(null);
+      setSelectedSentence(null);
+      setSelected(word);
+      speakEnglish(word.text, accent);
+    },
+    [accent],
+  );
+
+  const handleSelectSentence = useCallback(
+    (sentence: OcrSentence) => {
+      if (!sentence.trusted) return;
+      setSelected(null);
+      setSelectedSentence(sentence);
+      speakSentence(sentence.text, {
+        accent,
+        slow: false,
+        onWordIndex: setSpeakingWordIndex,
+      });
+    },
+    [accent],
+  );
 
   const handleSwitchStageMode = (nextMode: StageInteractionMode) => {
     if (nextMode === stageMode) return;
@@ -206,6 +226,25 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
             ⭐ 复习
           </button>
         </nav>
+
+        <div className="accent-switch" role="group" aria-label="英语口音切换">
+          <button
+            type="button"
+            className={`accent-pill${accent === 'uk' ? ' active' : ''}`}
+            aria-pressed={accent === 'uk'}
+            onClick={() => handleChangeAccent('uk')}
+          >
+            🇬🇧 英式
+          </button>
+          <button
+            type="button"
+            className={`accent-pill${accent === 'us' ? ' active' : ''}`}
+            aria-pressed={accent === 'us'}
+            onClick={() => handleChangeAccent('us')}
+          >
+            🇺🇸 美式
+          </button>
+        </div>
       </header>
 
       <main className="app-main">
@@ -295,6 +334,8 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
                       text={selected.text}
                       trusted
                       mode="lookup"
+                      accent={accent}
+                      onAccentChange={handleChangeAccent}
                       selectedWordId={selected.id}
                       pageSentence={activeSentence}
                       sentenceWords={activeSentenceWords}
@@ -314,6 +355,8 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
                     <SentenceCard
                       sentence={selectedSentence}
                       sentenceWords={activeSentenceWords}
+                      accent={accent}
+                      onAccentChange={handleChangeAccent}
                       speakingWordIndex={speakingWordIndex}
                       onSpeakingWordIndexChange={setSpeakingWordIndex}
                       onSelectWord={handleSelectWord}

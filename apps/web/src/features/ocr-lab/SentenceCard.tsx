@@ -10,11 +10,20 @@ import { getTake, putTake } from '../../data/vocab-db';
 import { formatTokenWithPunctuation } from '../../domain/sentence';
 import { isTrusted } from '../../platform/core/classify';
 import { recordClip } from '../../speech/record';
-import { speakEnglish, speakSentence, stopSpeaking } from '../../speech/speak';
+import {
+  getPreferredAccent,
+  setPreferredAccent,
+  speakEnglish,
+  speakSentence,
+  stopSpeaking,
+  type EnglishAccent,
+} from '../../speech/speak';
 
 interface SentenceCardProps {
   sentence: OcrSentence;
   sentenceWords: OcrWord[];
+  accent?: EnglishAccent;
+  onAccentChange?: (accent: EnglishAccent) => void;
   speakingWordIndex: number | null;
   onSpeakingWordIndexChange: (index: number | null) => void;
   onSelectWord?: (word: OcrWord) => void;
@@ -26,11 +35,15 @@ const SENTENCE_RECORD_SECONDS = 10;
 export function SentenceCard({
   sentence,
   sentenceWords,
+  accent: propAccent,
+  onAccentChange,
   speakingWordIndex,
   onSpeakingWordIndexChange,
   onSelectWord,
   onClose,
 }: SentenceCardProps) {
+  const [localAccent, setLocalAccent] = useState<EnglishAccent>(() => getPreferredAccent());
+  const activeAccent = propAccent ?? localAccent;
   const [transResult, setTransResult] = useState<SentenceTranslationResult | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [takeUrl, setTakeUrl] = useState<string | null>(null);
@@ -103,10 +116,17 @@ export function SentenceCard({
     };
   }, [sentence.text, takeKey]);
 
-  const handleReadSentence = (slow: boolean) => {
+  const handleReadSentence = (slow: boolean, customAccent?: EnglishAccent) => {
+    const chosen = customAccent ?? activeAccent;
+    if (customAccent) {
+      setPreferredAccent(customAccent);
+      setLocalAccent(customAccent);
+      onAccentChange?.(customAccent);
+    }
     audioRef.current?.pause();
     setPlayingTake(false);
     speakSentence(sentence.text, {
+      accent: chosen,
       slow,
       onWordIndex: onSpeakingWordIndexChange,
     });
@@ -177,11 +197,20 @@ export function SentenceCard({
         <span className="sentence-card-badge">📖 整句点读</span>
         <div className="word-card-header-actions">
           <button
-            className="kid-listen"
+            className={`kid-listen accent-btn${activeAccent === 'uk' ? ' is-active-accent' : ''}`}
             type="button"
-            onClick={() => handleReadSentence(false)}
+            aria-pressed={activeAccent === 'uk'}
+            onClick={() => handleReadSentence(false, 'uk')}
           >
-            🔊 读整句
+            🇬🇧 英音读
+          </button>
+          <button
+            className={`kid-listen accent-btn${activeAccent === 'us' ? ' is-active-accent' : ''}`}
+            type="button"
+            aria-pressed={activeAccent === 'us'}
+            onClick={() => handleReadSentence(false, 'us')}
+          >
+            🇺🇸 美音读
           </button>
           <button
             className="kid-listen slow"
@@ -270,7 +299,7 @@ export function SentenceCard({
                     if (matchedWord && onSelectWord) {
                       onSelectWord(matchedWord);
                     } else {
-                      speakEnglish(item.word);
+                      speakEnglish(item.word, activeAccent);
                     }
                   }}
                 >

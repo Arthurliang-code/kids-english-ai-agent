@@ -595,7 +595,10 @@ button.big {
 
 .kid-bar {
   display: flex;
+  align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
+  gap: 14px;
   padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 8px;
 }
 
@@ -605,7 +608,7 @@ button.big {
   gap: 12px;
 }
 
-.kid-bar button {
+.kid-nav button {
   min-width: 128px;
   min-height: 48px;
   border-radius: 999px;
@@ -615,9 +618,33 @@ button.big {
   border-color: transparent;
 }
 
-.kid-bar button.active {
+.kid-nav button.active {
   background: var(--page);
   box-shadow: 0 6px 16px rgba(29, 49, 72, 0.14);
+}
+
+.accent-switch {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.accent-switch .accent-pill {
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 0;
+  font-size: 16px;
+  font-weight: 700;
+  background: transparent;
+  color: var(--ink);
+}
+
+.accent-switch .accent-pill.active {
+  background: var(--page);
+  box-shadow: 0 4px 12px rgba(29, 49, 72, 0.14);
 }
 
 /* ---------- 点读主页与分栏工作台 ---------- */
@@ -894,15 +921,22 @@ button.big {
 }
 
 .kid-listen {
-  min-height: 52px;
-  padding: 0 20px;
+  min-height: 48px;
+  padding: 0 16px;
   border-radius: 999px;
   background: var(--sun);
   border-color: #e09a00;
   color: var(--sun-ink);
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 800;
   box-shadow: 0 4px 0 #e09a00;
+}
+
+.kid-listen.accent-btn:not(.is-active-accent) {
+  background: #fff8e1;
+  border-color: #fcd34d;
+  color: var(--sun-ink);
+  box-shadow: 0 3px 0 #f59e0b;
 }
 
 .kid-listen:active:not(:disabled) {

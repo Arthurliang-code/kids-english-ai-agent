@@ -14,12 +14,21 @@ import { splitSenses } from '../../domain/sense';
 import { formatTokenWithPunctuation } from '../../domain/sentence';
 import { isTrusted } from '../../platform/core/classify';
 import { recordClip } from '../../speech/record';
-import { speakEnglish, speakSentence, stopSpeaking } from '../../speech/speak';
+import {
+  getPreferredAccent,
+  setPreferredAccent,
+  speakEnglish,
+  speakSentence,
+  stopSpeaking,
+  type EnglishAccent,
+} from '../../speech/speak';
 
 interface WordCardProps {
   text: string;
   trusted: boolean;
   mode?: 'lookup' | 'review';
+  accent?: EnglishAccent;
+  onAccentChange?: (accent: EnglishAccent) => void;
   selectedWordId?: string | null;
   pageSentence?: OcrSentence | null;
   sentenceWords?: OcrWord[];
@@ -37,6 +46,8 @@ export function WordCard({
   text,
   trusted,
   mode = 'lookup',
+  accent: propAccent,
+  onAccentChange,
   selectedWordId = null,
   pageSentence = null,
   sentenceWords = [],
@@ -47,6 +58,16 @@ export function WordCard({
   onSelectWord,
   onClose,
 }: WordCardProps) {
+  const [localAccent, setLocalAccent] = useState<EnglishAccent>(() => getPreferredAccent());
+  const activeAccent = propAccent ?? localAccent;
+
+  const chooseAccentAndSpeakWord = (nextAccent: EnglishAccent) => {
+    setPreferredAccent(nextAccent);
+    setLocalAccent(nextAccent);
+    onAccentChange?.(nextAccent);
+    onSpeakingWordIndexChange?.(null);
+    speakEnglish(text, nextAccent);
+  };
   const [sense, setSense] = useState<GlossaryEntry | null>(null);
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
@@ -190,11 +211,18 @@ export function WordCard({
     void audio.play().catch(() => setPlayingTake(false));
   };
 
-  const handleReadContextSentence = (slow: boolean) => {
+  const handleReadContextSentence = (slow: boolean, customAccent?: EnglishAccent) => {
     if (!activeSentenceText) return;
+    const chosen = customAccent ?? activeAccent;
+    if (customAccent) {
+      setPreferredAccent(customAccent);
+      setLocalAccent(customAccent);
+      onAccentChange?.(customAccent);
+    }
     audioRef.current?.pause();
     setPlayingTake(false);
     speakSentence(activeSentenceText, {
+      accent: chosen,
       slow,
       onWordIndex: onSpeakingWordIndexChange,
     });
@@ -276,14 +304,20 @@ export function WordCard({
         </div>
         <div className="word-card-header-actions">
           <button
-            className="kid-listen"
+            className={`kid-listen accent-btn${activeAccent === 'uk' ? ' is-active-accent' : ''}`}
             type="button"
-            onClick={() => {
-              onSpeakingWordIndexChange?.(null);
-              speakEnglish(text);
-            }}
+            aria-pressed={activeAccent === 'uk'}
+            onClick={() => chooseAccentAndSpeakWord('uk')}
           >
-            🔊 听单词
+            🇬🇧 英音
+          </button>
+          <button
+            className={`kid-listen accent-btn${activeAccent === 'us' ? ' is-active-accent' : ''}`}
+            type="button"
+            aria-pressed={activeAccent === 'us'}
+            onClick={() => chooseAccentAndSpeakWord('us')}
+          >
+            🇺🇸 美音
           </button>
           {onClose ? (
             <button
@@ -314,9 +348,16 @@ export function WordCard({
               <button
                 type="button"
                 className="sentence-speak-btn"
-                onClick={() => handleReadContextSentence(false)}
+                onClick={() => handleReadContextSentence(false, 'uk')}
               >
-                🔊 读整句
+                🇬🇧 英音读句
+              </button>
+              <button
+                type="button"
+                className="sentence-speak-btn"
+                onClick={() => handleReadContextSentence(false, 'us')}
+              >
+                🇺🇸 美音读句
               </button>
               <button
                 type="button"
@@ -386,7 +427,7 @@ export function WordCard({
                 className="example-row"
                 onClick={() => {
                   onSpeakingWordIndexChange?.(null);
-                  speakEnglish(sentence);
+                  speakEnglish(sentence, activeAccent);
                 }}
               >
                 <span className="example-icon" aria-hidden="true">
