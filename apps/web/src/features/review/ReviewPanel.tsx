@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getParentApiKey, setParentApiKey } from '../../content/translate';
 import { importVocabFile, listItems, putItem, toVocabFile } from '../../data/vocab-db';
 import { dueItems, grade, todayISO, type ReviewItem } from '../../domain/review';
 import { speakEnglish } from '../../speech/speak';
@@ -7,6 +8,9 @@ import { WordCard } from '../ocr-lab/WordCard';
 export function ReviewPanel() {
   const [queue, setQueue] = useState<ReviewItem[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [apiKeyInput, setApiKeyInput] = useState(() => getParentApiKey());
+  const [showKey, setShowKey] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<string | null>(null);
 
   const reload = async () => {
     const items = await listItems();
@@ -57,6 +61,16 @@ export function ReviewPanel() {
     }
   };
 
+  const handleSaveKey = (event: React.FormEvent) => {
+    event.preventDefault();
+    setParentApiKey(apiKeyInput);
+    setKeyStatus(
+      apiKeyInput.trim()
+        ? '✅ 已保存在本台设备，点读长句将启用精准翻译。'
+        : '已清除本机翻译密钥，仅使用离线句型与词典。',
+    );
+  };
+
   return (
     <section className="review">
       <div className="card review-card">
@@ -65,7 +79,13 @@ export function ReviewPanel() {
         ) : current ? (
           <>
             <p className="review-count">今天还有 {queue.length} 个</p>
-            <WordCard text={current.word} trusted mode="review" />
+            <WordCard
+              text={current.word}
+              trusted
+              mode="review"
+              savedContextSentence={current.contextSentence}
+              savedContextTranslation={current.contextTranslation}
+            />
             <div className="word-card-actions">
               <button className="kid-listen" type="button" onClick={() => void mark(true)}>
                 会了
@@ -81,23 +101,83 @@ export function ReviewPanel() {
         {note ? <p className="footnote">{note}</p> : null}
       </div>
       <details className="parent-tools">
-        <summary>爸爸妈妈</summary>
-        <div className="word-card-actions">
-          <button type="button" onClick={() => void exportFile()}>
-            导出
-          </button>
-          <label className="kid-album">
-            导回
-            <input
-              type="file"
-              accept="application/json"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = '';
-                if (file) void importFile(file);
-              }}
-            />
-          </label>
+        <summary>爸爸妈妈（备份与本机翻译设置）</summary>
+        <div className="parent-tools-body">
+          <div className="word-card-actions">
+            <button type="button" onClick={() => void exportFile()}>
+              导出单词本
+            </button>
+            <label className="kid-album">
+              导回单词本
+              <input
+                type="file"
+                accept="application/json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = '';
+                  if (file) void importFile(file);
+                }}
+              />
+            </label>
+          </div>
+
+          <form className="parent-key-form" onSubmit={handleSaveKey}>
+            <label htmlFor="deepseek-api-key" className="parent-key-label">
+              本机整句 AI 翻译密钥（DeepSeek API Key）
+            </label>
+            <p id="deepseek-key-hint" className="footnote">
+              密钥只保存在这台 iPad 浏览器本地，不上传代码仓。填好后可结合上下文精准翻译复杂长句。
+            </p>
+            <div className="parent-key-row">
+              <input
+                id="deepseek-api-key"
+                name="deepseek_api_key"
+                type={showKey ? 'text' : 'password'}
+                value={apiKeyInput}
+                onChange={(e) => {
+                  setApiKeyInput(e.target.value);
+                  if (keyStatus) setKeyStatus(null);
+                }}
+                aria-describedby="deepseek-key-hint"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                placeholder="sk-..."
+                className="parent-key-input"
+              />
+              <button
+                type="button"
+                aria-pressed={showKey}
+                onClick={() => setShowKey((prev) => !prev)}
+                className="parent-key-toggle"
+              >
+                {showKey ? '隐藏' : '显示'}
+              </button>
+            </div>
+            <div className="parent-key-actions">
+              <button type="submit" className="primary">
+                保存在本机
+              </button>
+              {apiKeyInput.trim() ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setApiKeyInput('');
+                    setParentApiKey('');
+                    setKeyStatus('已清除本机翻译密钥。');
+                  }}
+                >
+                  清除密钥
+                </button>
+              ) : null}
+            </div>
+            {keyStatus ? (
+              <p className="footnote parent-key-status" role="status" aria-live="polite">
+                {keyStatus}
+              </p>
+            ) : null}
+          </form>
         </div>
       </details>
     </section>

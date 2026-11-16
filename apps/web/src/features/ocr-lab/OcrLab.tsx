@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { OcrResult, OcrWord } from '@kea/shared-types';
-import type { OcrEngine } from '../../platform/core/types';
-import { isTrusted } from '../../platform/core/classify';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { OcrResult, OcrSentence, OcrWord } from '@kea/shared-types';
+import { pretranslatePageSentences } from '../../content/translate';
 import { loadLexicon, lookupWord } from '../../domain/lexicon';
-import { TesseractEngine } from '../../platform/web/ocr/tesseract-engine';
+import { buildSentences, findSentenceForWord } from '../../domain/sentence';
+import { isTrusted } from '../../platform/core/classify';
+import type { OcrEngine } from '../../platform/core/types';
 import { loadImage, preprocess } from '../../platform/web/ocr/preprocess';
+import { TesseractEngine } from '../../platform/web/ocr/tesseract-engine';
 import { UpdateBanner } from '../../pwa/UpdateBanner';
-import { speakEnglish } from '../../speech/speak';
+import { speakEnglish, speakSentence, stopSpeaking } from '../../speech/speak';
 import { ReviewPanel } from '../review/ReviewPanel';
 import { CameraSheet } from './CameraSheet';
-import { ImageStage } from './ImageStage';
+import { ImageStage, type StageInteractionMode } from './ImageStage';
+import { SentenceCard } from './SentenceCard';
 import { WordCard } from './WordCard';
 
 type RunStatus = 'idle' | 'running' | 'done' | 'error';
@@ -28,7 +31,10 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
   const [scanLabel, setScanLabel] = useState('正在认字，马上就好…');
   const [result, setResult] = useState<OcrResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stageMode, setStageMode] = useState<StageInteractionMode>('word');
   const [selected, setSelected] = useState<OcrWord | null>(null);
+  const [selectedSentence, setSelectedSentence] = useState<OcrSentence | null>(null);
+  const [speakingWordIndex, setSpeakingWordIndex] = useState<number | null>(null);
   const [view, setView] = useState<'read' | 'review'>('read');
   const engineRef = useRef<OcrEngine | null>(null);
   const runId = useRef(0);
@@ -52,12 +58,15 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
 
   const applyImage = useCallback(async (url: string, fromObjectUrl: boolean) => {
     const id = ++runId.current;
+    stopSpeaking();
     setSource({ url, fromObjectUrl });
     setStatus('running');
     setScanLabel('正在认字…');
     setError(null);
     setResult(null);
     setSelected(null);
+    setSelectedSentence(null);
+    setSpeakingWordIndex(null);
 
     try {
       const [image, lexicon] = await Promise.all([loadImage(url), loadLexicon()]);
@@ -85,8 +94,12 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
         ...word,
         lexiconHit: lookupWord(lexicon, word.text),
       }));
-      setResult({ ...run.result, words });
+      const sentences = buildSentences(words, run.result.lines, isTrusted);
+      setResult({ ...run.result, words, sentences });
       setStatus('done');
+
+      const trustedSentenceTexts = sentences.filter((s) => s.trusted).map((s) => s.text);
+      void pretranslatePageSentences(trustedSentenceTexts);
     } catch {
       if (id !== runId.current) return;
       setError('这一页看不清，再拍一次吧。');
@@ -103,13 +116,70 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     await applyImage(url, fromObjectUrl);
   };
 
-  const handleSelect = useCallback((word: OcrWord) => {
+  const sentences = result?.sentences ?? [];
+  const words = result?.words ?? [];
+
+  const wordMap = useMemo(() => {
+    const map = new Map<string, OcrWord>();
+    for (const w of words) map.set(w.id, w);
+    return map;
+  }, [words]);
+
+  const activeSentence = useMemo(() => {
+    if (selectedSentence) return selectedSentence;
+    if (selected) return findSentenceForWord(sentences, selected.id);
+    return null;
+  }, [selected, selectedSentence, sentences]);
+
+  const activeSentenceWords = useMemo(() => {
+    if (!activeSentence) return [];
+    return activeSentence.wordIds
+      .map((id) => wordMap.get(id))
+      .filter((w): w is OcrWord => w !== undefined);
+  }, [activeSentence, wordMap]);
+
+  const speakingWordId = useMemo(() => {
+    if (speakingWordIndex === null || !activeSentence) return null;
+    return activeSentence.wordIds[speakingWordIndex] ?? null;
+  }, [activeSentence, speakingWordIndex]);
+
+  const handleSelectWord = useCallback((word: OcrWord) => {
     if (!isTrusted(word)) return;
+    setSpeakingWordIndex(null);
+    setSelectedSentence(null);
     setSelected(word);
     speakEnglish(word.text);
   }, []);
 
-  const trustedCount = result?.words.filter(isTrusted).length ?? 0;
+  const handleSelectSentence = useCallback((sentence: OcrSentence) => {
+    if (!sentence.trusted) return;
+    setSelected(null);
+    setSelectedSentence(sentence);
+    speakSentence(sentence.text, {
+      slow: false,
+      onWordIndex: setSpeakingWordIndex,
+    });
+  }, []);
+
+  const handleSwitchStageMode = (nextMode: StageInteractionMode) => {
+    if (nextMode === stageMode) return;
+    stopSpeaking();
+    setSpeakingWordIndex(null);
+    setStageMode(nextMode);
+    if (nextMode === 'sentence') {
+      if (selected) {
+        const matched = findSentenceForWord(sentences, selected.id);
+        setSelected(null);
+        setSelectedSentence(matched);
+      }
+    } else if (selectedSentence) {
+      setSelectedSentence(null);
+    }
+  };
+
+  const trustedCount = words.filter(isTrusted).length;
+  const trustedSentenceCount = sentences.filter((s) => s.trusted).length;
+  const hasCardOpen = Boolean(selected || selectedSentence);
 
   return (
     <div className="app">
@@ -128,7 +198,10 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
             type="button"
             className={view === 'review' ? 'active' : ''}
             aria-pressed={view === 'review'}
-            onClick={() => setView('review')}
+            onClick={() => {
+              stopSpeaking();
+              setView('review');
+            }}
           >
             ⭐ 复习
           </button>
@@ -140,20 +213,51 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
 
         <div className="kid-read" hidden={view !== 'read'}>
           {source ? (
-            <div className={`kid-workspace${selected ? ' has-selection' : ''}`}>
+            <div className={`kid-workspace${hasCardOpen ? ' has-selection' : ''}`}>
               <div className="kid-stage-area">
+                {status === 'done' && (trustedCount > 0 || trustedSentenceCount > 0) ? (
+                  <div className="stage-mode-bar" role="group" aria-label="点读粒度切换">
+                    <button
+                      type="button"
+                      className={`stage-mode-btn${stageMode === 'word' ? ' active' : ''}`}
+                      aria-pressed={stageMode === 'word'}
+                      onClick={() => handleSwitchStageMode('word')}
+                    >
+                      🔤 点单词
+                    </button>
+                    <button
+                      type="button"
+                      className={`stage-mode-btn${stageMode === 'sentence' ? ' active' : ''}`}
+                      aria-pressed={stageMode === 'sentence'}
+                      disabled={trustedSentenceCount === 0}
+                      onClick={() => handleSwitchStageMode('sentence')}
+                    >
+                      📖 读整句
+                    </button>
+                  </div>
+                ) : null}
+
                 <div className="kid-page">
                   <ImageStage
                     src={source.url}
-                    words={result?.words ?? []}
+                    words={words}
+                    sentences={sentences}
+                    stageMode={stageMode}
                     selectedId={selected?.id ?? null}
+                    selectedSentenceId={activeSentence?.id ?? null}
+                    speakingWordId={speakingWordId}
                     filter="trusted"
                     scanning={status === 'running'}
                     scanLabel={scanLabel}
-                    onSelect={handleSelect}
+                    onSelect={handleSelectWord}
+                    onSelectSentence={handleSelectSentence}
                   />
-                  {status === 'done' && trustedCount > 0 && !selected ? (
-                    <p className="kid-tip">👆 点一页里的绿色词框，听读音、看解释</p>
+                  {status === 'done' && trustedCount > 0 && !hasCardOpen ? (
+                    <p className="kid-tip">
+                      {stageMode === 'sentence'
+                        ? '👆 点一页里的蓝色整句框，听整句发音与中文意思'
+                        : '👆 点一页里的绿色词框，听单词和所在整句'}
+                    </p>
                   ) : null}
                   {error ? <p className="kid-alert">{error}</p> : null}
                   {status === 'done' && trustedCount === 0 ? (
@@ -191,7 +295,32 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
                       text={selected.text}
                       trusted
                       mode="lookup"
-                      onClose={() => setSelected(null)}
+                      selectedWordId={selected.id}
+                      pageSentence={activeSentence}
+                      sentenceWords={activeSentenceWords}
+                      speakingWordIndex={speakingWordIndex}
+                      onSpeakingWordIndexChange={setSpeakingWordIndex}
+                      onSelectWord={handleSelectWord}
+                      onClose={() => {
+                        setSpeakingWordIndex(null);
+                        setSelected(null);
+                      }}
+                    />
+                  </div>
+                </aside>
+              ) : selectedSentence ? (
+                <aside className="kid-card-panel" aria-label="整句卡片">
+                  <div className="kid-sheet">
+                    <SentenceCard
+                      sentence={selectedSentence}
+                      sentenceWords={activeSentenceWords}
+                      speakingWordIndex={speakingWordIndex}
+                      onSpeakingWordIndexChange={setSpeakingWordIndex}
+                      onSelectWord={handleSelectWord}
+                      onClose={() => {
+                        setSpeakingWordIndex(null);
+                        setSelectedSentence(null);
+                      }}
                     />
                   </div>
                 </aside>

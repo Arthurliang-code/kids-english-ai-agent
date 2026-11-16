@@ -23,8 +23,10 @@ export interface PixelBox {
 export interface OcrWord {
   /** 页内唯一，格式 `l{行号}-w{行内序号}` */
   id: string;
-  /** 原始识别文本，未做纠错 */
+  /** 归一化后的英文单词（去除了首尾标点） */
   text: string;
+  /** OCR 原始 token（保留句末标点如 `.` `?` `!` `,`，用于整句切分与还原） */
+  rawText?: string;
   /** 归一化置信度 0–1（引擎原始值，尚未做校准映射） */
   confidence: number;
   quad: Quad;
@@ -43,11 +45,27 @@ export interface OcrLine {
   quad: Quad;
 }
 
+export interface OcrSentence {
+  /** 页内唯一，格式 `s{序号}` */
+  id: string;
+  /** 重组后的完整英文句子（含标点） */
+  text: string;
+  /** 句内关联的 OcrWord.id 顺序列表 */
+  wordIds: string[];
+  /** 整句外接归一化坐标框 */
+  quad: Quad;
+  /** 句内单词平均置信度 0–1 */
+  confidence: number;
+  /** 是否为可信可读句子 */
+  trusted: boolean;
+}
+
 export interface OcrResult {
   engine: OcrEngineId;
   engineVersion: string;
   words: OcrWord[];
   lines: OcrLine[];
+  sentences?: OcrSentence[];
   rawText: string;
   image: { width: number; height: number };
   /** 被非英文/噪声规则丢弃的 token 数 */

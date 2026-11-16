@@ -1,22 +1,52 @@
 import { useEffect, useRef, useState } from 'react';
+import type { OcrSentence, OcrWord } from '@kea/shared-types';
 import { enrichSense, resolveSense } from '../../content/lookup';
-import { splitSenses } from '../../domain/sense';
+import {
+  hasParentApiKey,
+  resolveSentenceLocal,
+  translateSentenceWithAi,
+  type SentenceTranslationResult,
+} from '../../content/translate';
 import { getItem, getTake, putItem, putTake } from '../../data/vocab-db';
 import type { GlossaryEntry } from '../../domain/glossary';
 import { newItem, todayISO } from '../../domain/review';
+import { splitSenses } from '../../domain/sense';
+import { formatTokenWithPunctuation } from '../../domain/sentence';
+import { isTrusted } from '../../platform/core/classify';
 import { recordClip } from '../../speech/record';
-import { speakEnglish, stopSpeaking } from '../../speech/speak';
+import { speakEnglish, speakSentence, stopSpeaking } from '../../speech/speak';
 
 interface WordCardProps {
   text: string;
   trusted: boolean;
   mode?: 'lookup' | 'review';
+  selectedWordId?: string | null;
+  pageSentence?: OcrSentence | null;
+  sentenceWords?: OcrWord[];
+  savedContextSentence?: string;
+  savedContextTranslation?: string;
+  speakingWordIndex?: number | null;
+  onSpeakingWordIndexChange?: (index: number | null) => void;
+  onSelectWord?: (word: OcrWord) => void;
   onClose?: () => void;
 }
 
 const RECORD_SECONDS = 5;
 
-export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardProps) {
+export function WordCard({
+  text,
+  trusted,
+  mode = 'lookup',
+  selectedWordId = null,
+  pageSentence = null,
+  sentenceWords = [],
+  savedContextSentence,
+  savedContextTranslation,
+  speakingWordIndex = null,
+  onSpeakingWordIndexChange,
+  onSelectWord,
+  onClose,
+}: WordCardProps) {
   const [sense, setSense] = useState<GlossaryEntry | null>(null);
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
@@ -25,11 +55,15 @@ export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardPr
   const [remainingSec, setRemainingSec] = useState(RECORD_SECONDS);
   const [playingTake, setPlayingTake] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [sentenceTrans, setSentenceTrans] = useState<SentenceTranslationResult | null>(null);
+  const [sentenceLoading, setSentenceLoading] = useState(false);
 
   const clipRef = useRef<{ stop: () => void; done: Promise<Blob> } | null>(null);
   const countdownRef = useRef<number>(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const discardRecordingRef = useRef(false);
+
+  const activeSentenceText = pageSentence?.text ?? savedContextSentence ?? '';
 
   const clearRecordTimers = () => {
     if (countdownRef.current) {
@@ -91,8 +125,57 @@ export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardPr
     };
   }, [text, trusted]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeSentenceText) {
+      setSentenceTrans(null);
+      setSentenceLoading(false);
+      return;
+    }
+
+    if (savedContextTranslation) {
+      setSentenceTrans({
+        sentence: activeSentenceText,
+        translation: savedContextTranslation,
+        source: 'cached',
+        breakdown: [],
+      });
+      setSentenceLoading(false);
+      return;
+    }
+
+    void (async () => {
+      const localRes = await resolveSentenceLocal(activeSentenceText);
+      if (cancelled) return;
+      setSentenceTrans(localRes);
+
+      if (!localRes.translation && hasParentApiKey()) {
+        setSentenceLoading(true);
+        const aiText = await translateSentenceWithAi(activeSentenceText);
+        if (cancelled) return;
+        setSentenceLoading(false);
+        if (aiText) {
+          setSentenceTrans({
+            ...localRes,
+            translation: aiText,
+            source: 'ai',
+          });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSentenceText, savedContextTranslation]);
+
   const save = async () => {
-    await putItem(newItem(text, todayISO()));
+    await putItem(
+      newItem(text, todayISO(), {
+        sentence: activeSentenceText || undefined,
+        translation: sentenceTrans?.translation ?? undefined,
+      }),
+    );
     setSaved(true);
   };
 
@@ -105,6 +188,16 @@ export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardPr
     audio.addEventListener('ended', () => setPlayingTake(false));
     audio.addEventListener('error', () => setPlayingTake(false));
     void audio.play().catch(() => setPlayingTake(false));
+  };
+
+  const handleReadContextSentence = (slow: boolean) => {
+    if (!activeSentenceText) return;
+    audioRef.current?.pause();
+    setPlayingTake(false);
+    speakSentence(activeSentenceText, {
+      slow,
+      onWordIndex: onSpeakingWordIndexChange,
+    });
   };
 
   const toggleRecording = () => {
@@ -182,14 +275,24 @@ export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardPr
           ) : null}
         </div>
         <div className="word-card-header-actions">
-          <button className="kid-listen" type="button" onClick={() => speakEnglish(text)}>
+          <button
+            className="kid-listen"
+            type="button"
+            onClick={() => {
+              onSpeakingWordIndexChange?.(null);
+              speakEnglish(text);
+            }}
+          >
             🔊 听单词
           </button>
           {onClose ? (
             <button
               className="kid-card-dismiss"
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                stopSpeaking();
+                onClose();
+              }}
               aria-label="收起词卡"
             >
               好了
@@ -203,8 +306,75 @@ export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardPr
         <p className="word-card-meaning">{loading ? '正在找这个词…' : sense?.meaning}</p>
       </div>
 
+      {activeSentenceText ? (
+        <div className="context-sentence-box">
+          <div className="context-sentence-head">
+            <span className="context-sentence-badge">📖 书上这一句</span>
+            <div className="context-sentence-btns">
+              <button
+                type="button"
+                className="sentence-speak-btn"
+                onClick={() => handleReadContextSentence(false)}
+              >
+                🔊 读整句
+              </button>
+              <button
+                type="button"
+                className="sentence-speak-btn slow"
+                onClick={() => handleReadContextSentence(true)}
+              >
+                🐢 慢读
+              </button>
+            </div>
+          </div>
+
+          <div className="context-sentence-words" lang="en">
+            {sentenceWords.length > 0 ? (
+              sentenceWords.map((word, idx) => {
+                const { token } = formatTokenWithPunctuation(word);
+                const isCurrent =
+                  word.id === selectedWordId || word.text.toLowerCase() === text.toLowerCase();
+                const isSpeaking = speakingWordIndex === idx;
+                const canClick = isTrusted(word) && Boolean(onSelectWord);
+                return (
+                  <button
+                    key={word.id}
+                    type="button"
+                    className={`sentence-token-btn${isCurrent ? ' is-target' : ''}${isSpeaking ? ' is-speaking' : ''}`}
+                    disabled={!canClick}
+                    onClick={() => {
+                      if (canClick) onSelectWord?.(word);
+                    }}
+                  >
+                    {token}
+                  </button>
+                );
+              })
+            ) : (
+              <p className="context-sentence-plain">{activeSentenceText}</p>
+            )}
+          </div>
+
+          {sentenceLoading ? (
+            <p className="context-sentence-zh is-loading">正在翻译这一句…</p>
+          ) : sentenceTrans?.translation ? (
+            <p className="context-sentence-zh">{sentenceTrans.translation}</p>
+          ) : sentenceTrans && sentenceTrans.breakdown.length > 0 ? (
+            <div className="context-sentence-breakdown">
+              {sentenceTrans.breakdown.map((item) => (
+                <span key={item.word} className="breakdown-chip">
+                  <strong lang="en">{item.word}</strong> {item.meaning}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="word-sense">
-        <p className="word-sense-label">点句子听一听</p>
+        <p className="word-sense-label">
+          {activeSentenceText ? '更多例句（点句子听一听）' : '点句子听一听'}
+        </p>
         {loading ? (
           <p className="word-card-example">正在准备例句…</p>
         ) : (
@@ -214,7 +384,10 @@ export function WordCard({ text, trusted, mode = 'lookup', onClose }: WordCardPr
                 key={sentence}
                 type="button"
                 className="example-row"
-                onClick={() => speakEnglish(sentence)}
+                onClick={() => {
+                  onSpeakingWordIndexChange?.(null);
+                  speakEnglish(sentence);
+                }}
               >
                 <span className="example-icon" aria-hidden="true">
                   🔊

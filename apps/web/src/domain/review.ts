@@ -6,6 +6,15 @@ export interface ReviewItem {
   word: string;
   stage: number;
   due: string;
+  /** 记单词时所在的课本原句 */
+  contextSentence?: string;
+  /** 课本原句对应的中文翻译 */
+  contextTranslation?: string;
+}
+
+export interface ReviewContext {
+  sentence?: string;
+  translation?: string;
 }
 
 export interface VocabFile {
@@ -27,8 +36,13 @@ export function addDays(iso: string, days: number): string {
   return todayISO(date);
 }
 
-export function newItem(word: string, today: string): ReviewItem {
-  return { word: word.toLowerCase(), stage: 0, due: today };
+export function newItem(word: string, today: string, context?: ReviewContext): ReviewItem {
+  const item: ReviewItem = { word: word.toLowerCase(), stage: 0, due: today };
+  const sentence = context?.sentence?.trim();
+  const translation = context?.translation?.trim();
+  if (sentence) item.contextSentence = sentence;
+  if (translation) item.contextTranslation = translation;
+  return item;
 }
 
 function clampStage(stage: number): number {
@@ -38,7 +52,10 @@ function clampStage(stage: number): number {
 export function grade(item: ReviewItem, correct: boolean, today: string): ReviewItem {
   const stage = clampStage(correct ? item.stage + 1 : item.stage - 1);
   const interval = REVIEW_INTERVALS_DAYS[stage] ?? 0;
-  return { word: item.word, stage, due: addDays(today, interval) };
+  const next: ReviewItem = { word: item.word, stage, due: addDays(today, interval) };
+  if (item.contextSentence) next.contextSentence = item.contextSentence;
+  if (item.contextTranslation) next.contextTranslation = item.contextTranslation;
+  return next;
 }
 
 export function dueItems(
@@ -62,12 +79,29 @@ export function parseVocabExport(value: unknown): ReviewItem[] | null {
   const items: ReviewItem[] = [];
   for (const raw of file.items) {
     if (!raw || typeof raw !== 'object') return null;
-    const item = raw as { word?: unknown; stage?: unknown; due?: unknown };
+    const item = raw as {
+      word?: unknown;
+      stage?: unknown;
+      due?: unknown;
+      contextSentence?: unknown;
+      contextTranslation?: unknown;
+    };
     if (typeof item.word !== 'string' || !/^[a-z][a-z'’-]*$/i.test(item.word)) return null;
     if (typeof item.stage !== 'number' || !Number.isInteger(item.stage)) return null;
     if (item.stage < 0 || item.stage > 5) return null;
     if (typeof item.due !== 'string' || !DUE.test(item.due)) return null;
-    items.push({ word: item.word.toLowerCase(), stage: item.stage, due: item.due });
+    const parsedItem: ReviewItem = {
+      word: item.word.toLowerCase(),
+      stage: item.stage,
+      due: item.due,
+    };
+    if (typeof item.contextSentence === 'string' && item.contextSentence.trim()) {
+      parsedItem.contextSentence = item.contextSentence.trim().slice(0, 240);
+    }
+    if (typeof item.contextTranslation === 'string' && item.contextTranslation.trim()) {
+      parsedItem.contextTranslation = item.contextTranslation.trim().slice(0, 240);
+    }
+    items.push(parsedItem);
   }
   return items;
 }

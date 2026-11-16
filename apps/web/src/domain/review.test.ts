@@ -30,8 +30,17 @@ test('每天最多列出 20 个到期词，先到期、阶段低的在前', () =
   );
 });
 
-test('导出文件可以原样导回', () => {
-  const items = [newItem('cat', todayISO(new Date(2026, 10, 9)))];
+test('导出文件可以原样导回，且保留课本原句与译文', () => {
+  const items = [
+    newItem('cat', todayISO(new Date(2026, 10, 9)), {
+      sentence: 'The cat is on the mat.',
+      translation: '猫咪在垫子上。',
+    }),
+  ];
+  const graded = grade(items[0]!, true, '2026-11-09');
+  assert.equal(graded.contextSentence, 'The cat is on the mat.');
+  assert.equal(graded.contextTranslation, '猫咪在垫子上。');
+
   const parsed = parseVocabExport({ version: 1, items });
   assert.deepEqual(parsed, items);
   assert.equal(parseVocabExport({ version: 2, items }), null);

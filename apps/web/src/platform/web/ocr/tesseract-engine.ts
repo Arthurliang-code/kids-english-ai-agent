@@ -164,6 +164,7 @@ export class TesseractEngine implements OcrEngine {
               words.push({
                 id: `${lineId}-w${indexInLine}`,
                 text: normalized,
+                rawText: word.text.trim(),
                 confidence: Math.max(0, Math.min(1, word.confidence / 100)),
                 quad: rectToQuad(word.bbox, width, height),
                 lineId,

@@ -162,10 +162,46 @@ button.big {
   fill: rgba(42, 157, 143, 0.26);
 }
 
+.word-box.in-sentence {
+  fill: rgba(255, 183, 3, 0.16);
+  stroke: #eab308;
+  stroke-dasharray: 4 2;
+}
+
 .word-box.is-selected {
   stroke: #d97706;
   stroke-width: 3.6;
   fill: rgba(255, 183, 3, 0.38);
+}
+
+.word-box.is-speaking {
+  stroke: #dc2626;
+  stroke-width: 3.8;
+  fill: rgba(251, 191, 36, 0.48);
+}
+
+.word-box.pointer-none {
+  pointer-events: none;
+}
+
+.sentence-box {
+  fill: rgba(74, 163, 232, 0.14);
+  stroke: #0284c7;
+  stroke-width: 2.6;
+  stroke-linejoin: round;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: fill 0.15s ease, stroke 0.15s ease;
+}
+
+.sentence-box:hover {
+  fill: rgba(74, 163, 232, 0.26);
+}
+
+.sentence-box.is-selected {
+  stroke: #d97706;
+  stroke-width: 3.8;
+  fill: rgba(255, 183, 3, 0.32);
 }
 
 /* ---------- 书页原位扫描动效 ---------- */
@@ -684,6 +720,34 @@ button.big {
   flex-direction: column;
 }
 
+.stage-mode-bar {
+  align-self: center;
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+}
+
+.stage-mode-btn {
+  min-height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 0;
+  font-size: 16px;
+  font-weight: 700;
+  background: transparent;
+  color: var(--ink);
+}
+
+.stage-mode-btn.active {
+  background: var(--sun);
+  color: var(--sun-ink);
+  box-shadow: 0 3px 10px rgba(29, 49, 72, 0.14);
+}
+
 .kid-page {
   flex: 1;
   min-height: 0;
@@ -1006,10 +1070,271 @@ button.big {
   width: min(560px, 100%);
   color: var(--muted);
   font-size: 14px;
+  background: rgba(255, 254, 248, 0.85);
+  border-radius: 16px;
+  padding: 12px 16px;
+  box-sizing: border-box;
 }
 
 .parent-tools summary {
   cursor: pointer;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.parent-tools-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.parent-key-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.parent-key-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.parent-key-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.parent-key-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: max(1rem, 1em);
+  padding: 10px 12px;
+  min-height: 48px;
+  border-radius: 10px;
+  border: 1.5px solid #767676;
+  background: #ffffff;
+  color: var(--ink);
+  box-sizing: border-box;
+}
+
+.parent-key-input:focus-visible {
+  outline: 3px solid var(--sun-ink);
+  outline-offset: 2px;
+}
+
+.parent-key-toggle {
+  min-height: 48px;
+  padding: 0 14px;
+}
+
+.parent-key-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.parent-key-status {
+  color: #16655b;
+  font-weight: 600;
+}
+
+/* ---------- 词卡内嵌「书上这一句」与独立「整句精读卡」 ---------- */
+
+.context-sentence-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: #f0f9ff;
+  border: 1.5px solid #bae6fd;
+}
+
+.context-sentence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.context-sentence-badge,
+.sentence-card-badge {
+  font-size: 14px;
+  font-weight: 800;
+  color: #0369a1;
+  background: #e0f2fe;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.context-sentence-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.sentence-speak-btn {
+  min-height: 36px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 700;
+  background: var(--sun);
+  border-color: #e09a00;
+  color: var(--sun-ink);
+}
+
+.sentence-speak-btn.slow,
+.kid-listen.slow {
+  background: #e0f2fe;
+  border-color: #7dd3fc;
+  color: #0369a1;
+  box-shadow: 0 4px 0 #7dd3fc;
+}
+
+.sentence-speak-btn.slow {
+  box-shadow: none;
+}
+
+.context-sentence-words,
+.sentence-tokens-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.sentence-tokens-box {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: #f8fafc;
+  border: 1.5px solid var(--border);
+}
+
+.sentence-token-btn {
+  min-height: 38px;
+  padding: 4px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.85);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink);
+  transition: transform 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+
+.sentence-card .sentence-token-btn {
+  font-size: 24px;
+  min-height: 44px;
+  padding: 6px 12px;
+}
+
+.sentence-token-btn:disabled {
+  opacity: 0.85;
+  cursor: default;
+}
+
+.sentence-token-btn.is-target {
+  background: #fef3c7;
+  border-color: #f59e0b;
+  color: #92400e;
+}
+
+.sentence-token-btn.is-speaking {
+  background: #fde047;
+  border-color: #ca8a04;
+  color: #713f12;
+  transform: translateY(-2px) scale(1.04);
+  box-shadow: 0 4px 10px rgba(202, 138, 4, 0.25);
+}
+
+.context-sentence-plain,
+.sentence-plain-text {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--ink);
+}
+
+.context-sentence-zh {
+  margin: 2px 0 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #0c4a6e;
+  line-height: 1.4;
+}
+
+.context-sentence-zh.is-loading,
+.word-card-meaning.is-loading {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.context-sentence-breakdown,
+.sentence-breakdown-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.sentence-breakdown-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sentence-breakdown-note {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.breakdown-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #bae6fd;
+  font-size: 15px;
+  color: var(--ink);
+}
+
+.sentence-word-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.word-strip-chip {
+  min-height: 42px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: #f8fbff;
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.word-strip-chip .chip-en {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.word-strip-chip .chip-zh {
+  font-size: 15px;
+  color: var(--muted);
 }
 
 @media (max-width: 700px) {
