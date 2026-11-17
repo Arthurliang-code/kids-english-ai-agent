@@ -157,7 +157,8 @@ export function WordCard({
       setSentenceTrans({
         sentence: activeSentenceText,
         translation: savedContextTranslation,
-        source: 'cached',
+        source: 'template',
+        needsAiUpgrade: false,
         breakdown: [],
       });
       setSentenceLoading(false);
@@ -169,16 +170,18 @@ export function WordCard({
       if (cancelled) return;
       setSentenceTrans(localRes);
 
-      if (!localRes.translation) {
+      if (localRes.needsAiUpgrade) {
         setSentenceLoading(true);
-        const aiText = await translateSentenceWithAi(activeSentenceText);
+        const aiResult = await translateSentenceWithAi(activeSentenceText);
         if (cancelled) return;
         setSentenceLoading(false);
-        if (aiText) {
+        if (aiResult) {
           setSentenceTrans({
             ...localRes,
-            translation: aiText,
-            source: 'ai',
+            correctedEn: aiResult.en,
+            translation: aiResult.zh,
+            source: aiResult.source,
+            needsAiUpgrade: false,
           });
         }
       }
@@ -192,7 +195,7 @@ export function WordCard({
   const save = async () => {
     await putItem(
       newItem(text, todayISO(), {
-        sentence: activeSentenceText || undefined,
+        sentence: (sentenceTrans?.correctedEn ?? activeSentenceText) || undefined,
         translation: sentenceTrans?.translation ?? undefined,
       }),
     );
@@ -211,7 +214,8 @@ export function WordCard({
   };
 
   const handleReadContextSentence = (slow: boolean, customAccent?: EnglishAccent) => {
-    if (!activeSentenceText) return;
+    const speakText = sentenceTrans?.correctedEn ?? activeSentenceText;
+    if (!speakText) return;
     const chosen = customAccent ?? activeAccent;
     if (customAccent) {
       setPreferredAccent(customAccent);
@@ -220,7 +224,7 @@ export function WordCard({
     }
     audioRef.current?.pause();
     setPlayingTake(false);
-    speakSentence(activeSentenceText, {
+    speakSentence(speakText, {
       accent: chosen,
       slow,
       onWordIndex: onSpeakingWordIndexChange,
@@ -395,10 +399,28 @@ export function WordCard({
             )}
           </div>
 
-          {sentenceLoading ? (
-            <p className="context-sentence-zh is-loading">正在翻译这一句…</p>
-          ) : sentenceTrans?.translation ? (
-            <p className="context-sentence-zh">{sentenceTrans.translation}</p>
+          {sentenceTrans?.correctedEn &&
+          sentenceTrans.correctedEn.toLowerCase() !== activeSentenceText.toLowerCase() ? (
+            <p className="sentence-repaired-en" lang="en">
+              ✨ 校对整句：{sentenceTrans.correctedEn}
+            </p>
+          ) : null}
+
+          {sentenceTrans?.translation ? (
+            <div className="sentence-zh-row">
+              <p className="context-sentence-zh">{sentenceTrans.translation}</p>
+              <span className={`trans-source-tag src-${sentenceTrans.source}`}>
+                {sentenceLoading
+                  ? '⏳ AI精翻中…'
+                  : sentenceTrans.source === 'ai'
+                    ? '✨ AI精翻'
+                    : sentenceTrans.source === 'template'
+                      ? '⚡ 常用句'
+                      : '🌐 基础翻译'}
+              </span>
+            </div>
+          ) : sentenceLoading ? (
+            <p className="context-sentence-zh is-loading">正在 AI 精翻这一句…</p>
           ) : sentenceTrans && sentenceTrans.breakdown.length > 0 ? (
             <div className="context-sentence-breakdown">
               {sentenceTrans.breakdown.map((item) => (

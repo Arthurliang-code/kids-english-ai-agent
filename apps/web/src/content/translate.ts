@@ -4,27 +4,63 @@ import { lemmaCandidates } from '../domain/lexicon';
 import { lookupZhSense, type ZhDict } from '../domain/sense';
 import {
   buildSentenceWordBreakdown,
+  matchExactSentence,
   matchHighConfidenceTemplate,
   normalizeSentenceKey,
   type WordGlossItem,
 } from '../domain/sentence';
 
 const API_KEY_STORAGE = 'kea.parent.deepseek_key';
-const CACHE_STORAGE = 'kea.sentence.cache.v2';
-const MAX_CACHE_ENTRIES = 500;
+const CACHE_STORAGE = 'kea.sentence.cache.v3';
+const MAX_CACHE_ENTRIES = 600;
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
 const UNSAFE_ZH = /赌博|色情|暴力|自杀|毒品|脏话|杀害|mymemory|warning|quota/i;
 
-export type TranslationSource = 'template' | 'ai' | 'cached' | 'breakdown';
+/** 固定不变的精简 System Prompt：触发 DeepSeek 自动前缀缓存（输入成本再降 ~90%），无误时省略 en 字段省输出 token */
+const BATCH_SYSTEM_PROMPT =
+  '你是小学英语老师。核对并翻译OCR英文条目[["id","英文"]]。' +
+  '规则：1.仅当英文有明显OCR错拼/乱码词/缺断字母时给出en(修正后英文，填空保持语义)；原句无误则省略en以省字数；' +
+  '2.纯非英语乱码设drop:true并设zh:""；' +
+  '3.译为自然地道适合小学生的简体中文zh。' +
+  '只输出纯JSON：{"items":[{"id":"...","en":"可选","zh":"...","drop":false}]}';
+
+const SINGLE_SYSTEM_PROMPT =
+  '你是小学英语老师。核对并翻译这句OCR英文。若原句无误只回{"zh":"自然中文"}；' +
+  '若有明显OCR错字/尾部乱码回{"en":"修正英文","zh":"自然中文"}；若纯乱码回{"drop":true,"zh":""}。只输出JSON。';
+
+export type TranslationSource = 'template' | 'ai' | 'nmt' | 'draft' | 'breakdown';
 
 export interface SentenceTranslationResult {
   sentence: string;
+  /** 若大模型修复了 OCR 错别字/碎片，返回修正后的英文 */
+  correctedEn?: string;
   /** 完整自然中文译文 */
   translation: string | null;
   source: TranslationSource;
+  /** 若当前为草稿或待 AI 升级，为 true */
+  needsAiUpgrade: boolean;
   /** 句中重点实词词义拆解 */
   breakdown: WordGlossItem[];
+}
+
+export interface PageBatchItemInput {
+  id: string;
+  text: string;
+}
+
+export interface PageBatchRefineResult {
+  id: string;
+  originalText: string;
+  correctedEn?: string;
+  zh?: string;
+  drop?: boolean;
+}
+
+interface CachedEntry {
+  zh: string;
+  en?: string;
+  src: 'ds' | 'nmt';
 }
 
 /* ---------- 家长本机 API Key 管理 ---------- */
@@ -54,11 +90,61 @@ export function hasParentApiKey(): boolean {
   return getParentApiKey().length > 0;
 }
 
+/** 验证 DeepSeek API Key 是否连通且可用（极简 1-token 探测） */
+export async function testParentApiKey(
+  candidateKey?: string,
+): Promise<{ ok: boolean; message: string }> {
+  const key = (candidateKey ?? getParentApiKey()).trim();
+  if (!key) {
+    return { ok: false, message: '请先填入 DeepSeek API Key。' };
+  }
+  if (!key.startsWith('sk-') || key.length < 20) {
+    return { ok: false, message: '密钥格式看起来不对，DeepSeek Key 通常以 sk- 开头。' };
+  }
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 8000);
+  try {
+    const resp = await fetch(DEEPSEEK_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    if (resp.ok) {
+      return { ok: true, message: '✅ 验证通过！已启用整页 OCR 纠错 + DeepSeek 精翻。' };
+    }
+    if (resp.status === 401) {
+      return { ok: false, message: '❌ 密钥无效或已过期 (401)，请检查是否多空格或复制错误。' };
+    }
+    if (resp.status === 402) {
+      return { ok: false, message: '❌ DeepSeek 账户余额不足 (402)，请充值后再试。' };
+    }
+    if (resp.status === 429) {
+      return { ok: false, message: '⚠️ 请求过于频繁 (429)，密钥本身有效，请稍后再试。' };
+    }
+    return { ok: false, message: `❌ 接口返回异常状态 (${resp.status})。` };
+  } catch {
+    return { ok: false, message: '❌ 网络超时或无法连接到 api.deepseek.com，请检查网络。' };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 /* ---------- 本机持久化句子译文缓存 ---------- */
 
-let memoryCache: Record<string, string> | null = null;
+let memoryCache: Record<string, CachedEntry> | null = null;
+let inFlightBatchPromise: Promise<PageBatchRefineResult[]> | null = null;
 
-function readCache(): Record<string, string> {
+function readCache(): Record<string, CachedEntry> {
   if (memoryCache) return memoryCache;
   try {
     const raw = localStorage.getItem(CACHE_STORAGE);
@@ -68,7 +154,7 @@ function readCache(): Record<string, string> {
     }
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      memoryCache = parsed as Record<string, string>;
+      memoryCache = parsed as Record<string, CachedEntry>;
       return memoryCache;
     }
   } catch {
@@ -78,11 +164,21 @@ function readCache(): Record<string, string> {
   return memoryCache;
 }
 
-function writeCacheEntry(sentence: string, translation: string): void {
+function writeCacheEntry(sentence: string, entry: CachedEntry): void {
   const key = normalizeSentenceKey(sentence);
-  if (!key || !translation) return;
+  if (!key || !entry.zh) return;
   const store = readCache();
-  store[key] = translation;
+  // 若已有高质量 DeepSeek 缓存，不用免费 NMT 覆盖
+  if (store[key]?.src === 'ds' && entry.src === 'nmt') return;
+
+  store[key] = entry;
+  // 若修正过英文，同时为修正后文本建立索引，防止重复扣 token
+  if (entry.en) {
+    const repairedKey = normalizeSentenceKey(entry.en);
+    if (repairedKey && repairedKey !== key) {
+      store[repairedKey] = { zh: entry.zh, src: entry.src };
+    }
+  }
 
   const keys = Object.keys(store);
   if (keys.length > MAX_CACHE_ENTRIES) {
@@ -98,7 +194,7 @@ function writeCacheEntry(sentence: string, translation: string): void {
   }
 }
 
-export function getCachedTranslation(sentence: string): string | null {
+export function getCachedEntry(sentence: string): CachedEntry | null {
   const key = normalizeSentenceKey(sentence);
   return readCache()[key] ?? null;
 }
@@ -108,7 +204,7 @@ export function getCachedTranslation(sentence: string): string | null {
 function sanitizeSentenceInput(raw: string): string | null {
   const cleaned = raw
     .replace(/[\r\n\t]+/g, ' ')
-    .replace(/[^A-Za-z0-9\s.,?!'"’‘“”\-;:()]/g, '')
+    .replace(/[^A-Za-z0-9\s.,?!'"’‘“”\-;:()_]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -126,6 +222,14 @@ function validateChineseOutput(raw: string): string | null {
   if (!cleaned || cleaned.length > 140) return null;
   if (!/[\u4e00-\u9fff]/.test(cleaned)) return null;
   if (UNSAFE_ZH.test(cleaned)) return null;
+  return cleaned;
+}
+
+function validateRepairedEnglish(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const cleaned = raw.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (cleaned.length < 3 || cleaned.length > 220) return undefined;
+  if (!/[A-Za-z]{2,}/.test(cleaned)) return undefined;
   return cleaned;
 }
 
@@ -149,30 +253,58 @@ function tokenizeSentenceWords(sentence: string): string[] {
 }
 
 /**
- * 第一步：纯本机秒级解析（查缓存 -> 查本地整句语法与句型引擎 -> 提取重点词）
+ * 第一步：秒级本地解析。
+ * - 若有 DeepSeek Key：仅“固定问候句”和“已是 DeepSeek 缓存”的句子直接定稿；
+ *   本地通用规则或旧 NMT 缓存只作为加载瞬时的草稿，不会再阻断 DeepSeek！
  */
 export async function resolveSentenceLocal(sentence: string): Promise<SentenceTranslationResult> {
   const dict = await loadZhDict();
   const lookupMeaning = createWordLookup(dict);
   const words = tokenizeSentenceWords(sentence);
   const breakdown = buildSentenceWordBreakdown(words, lookupMeaning);
+  const hasKey = hasParentApiKey();
 
-  const cached = getCachedTranslation(sentence);
+  const cached = getCachedEntry(sentence);
   if (cached) {
+    if (cached.src === 'ds' || !hasKey) {
+      return {
+        sentence,
+        correctedEn: cached.en,
+        translation: cached.zh,
+        source: cached.src === 'ds' ? 'ai' : 'nmt',
+        needsAiUpgrade: false,
+        breakdown,
+      };
+    }
+    // 有 Key 但缓存里是旧的免费 NMT，先当作草稿展示并允许 DeepSeek 升级覆盖
     return {
       sentence,
-      translation: cached,
-      source: 'cached',
+      translation: cached.zh,
+      source: 'draft',
+      needsAiUpgrade: true,
       breakdown,
     };
   }
 
-  const fromTemplate = matchHighConfidenceTemplate(sentence, lookupMeaning);
-  if (fromTemplate) {
+  const exact = matchExactSentence(sentence);
+  if (exact) {
     return {
       sentence,
-      translation: fromTemplate,
+      translation: exact,
       source: 'template',
+      needsAiUpgrade: false,
+      breakdown,
+    };
+  }
+
+  const fromRule = matchHighConfidenceTemplate(sentence, lookupMeaning);
+  if (fromRule) {
+    return {
+      sentence,
+      translation: fromRule,
+      // 有 Key 时仅当临时草稿，继续放行给 DeepSeek 精翻（解决之前“规则截胡 AI”的问题）
+      source: hasKey ? 'draft' : 'template',
+      needsAiUpgrade: hasKey,
       breakdown,
     };
   }
@@ -181,6 +313,7 @@ export async function resolveSentenceLocal(sentence: string): Promise<SentenceTr
     sentence,
     translation: null,
     source: 'breakdown',
+    needsAiUpgrade: true,
     breakdown,
   };
 }
@@ -216,12 +349,12 @@ async function translateViaGtx(safeInput: string, signal: AbortSignal): Promise<
   return valid;
 }
 
-/** DeepSeek 大模型语境翻译（配置了本机 API Key 时优先使用） */
+/** DeepSeek 单句纠错 + 精翻 */
 async function translateViaDeepSeek(
   safeInput: string,
   apiKey: string,
   signal: AbortSignal,
-): Promise<string | null> {
+): Promise<{ en?: string; zh: string } | null> {
   try {
     const response = await fetch(DEEPSEEK_ENDPOINT, {
       method: 'POST',
@@ -233,17 +366,11 @@ async function translateViaDeepSeek(
       body: JSON.stringify({
         model: 'deepseek-chat',
         temperature: 0.1,
-        max_tokens: 120,
+        max_tokens: 140,
+        response_format: { type: 'json_object' },
         messages: [
-          {
-            role: 'system',
-            content:
-              '你是一位中国小学英语老师。请将用户给出的英文课本句子翻译成自然、准确、适合小学生理解的简体中文。只输出中文译文，不要解释，不要加引号。',
-          },
-          {
-            role: 'user',
-            content: safeInput,
-          },
+          { role: 'system', content: SINGLE_SYSTEM_PROMPT },
+          { role: 'user', content: safeInput },
         ],
       }),
     });
@@ -252,34 +379,69 @@ async function translateViaDeepSeek(
     const payload = (await response.json()) as {
       choices?: { message?: { content?: string } }[];
     };
-    const rawContent = payload.choices?.[0]?.message?.content ?? '';
-    return validateChineseOutput(rawContent);
+    const rawContent = (payload.choices?.[0]?.message?.content ?? '')
+      .replace(/^```(?:json)?\s*/m, '')
+      .replace(/```\s*$/m, '')
+      .trim();
+
+    try {
+      const parsed = JSON.parse(rawContent) as {
+        en?: unknown;
+        zh?: unknown;
+        drop?: unknown;
+      };
+      if (parsed.drop === true) return null;
+      const zh = typeof parsed.zh === 'string' ? validateChineseOutput(parsed.zh) : null;
+      if (!zh) return null;
+      return { en: validateRepairedEnglish(parsed.en), zh };
+    } catch {
+      const zh = validateChineseOutput(rawContent);
+      return zh ? { zh } : null;
+    }
   } catch {
     return null;
   }
 }
 
+/** 等待正在进行的整页批量精翻完成，避免同一句重复扣减 token */
+export async function awaitInFlightBatch(): Promise<void> {
+  if (inFlightBatchPromise) {
+    await inFlightBatchPromise.catch(() => undefined);
+  }
+}
+
 /**
- * 第二步：整句在线神经网络翻译（优先使用 DeepSeek Key，未配置 Key 时自动走免配置双路神经网络翻译竞速）
+ * 第二步：单句精翻升级（先等整页批处理完成，优先命中 DeepSeek 缓存，未命中再调 DeepSeek，失败兜底免费 NMT）
  */
-export async function translateSentenceWithAi(sentence: string): Promise<string | null> {
-  const cached = getCachedTranslation(sentence);
-  if (cached) return cached;
+export async function translateSentenceWithAi(
+  sentence: string,
+): Promise<{ zh: string; en?: string; source: 'ai' | 'nmt' } | null> {
+  await awaitInFlightBatch();
+
+  const hasKey = hasParentApiKey();
+  const cached = getCachedEntry(sentence);
+  if (cached && (cached.src === 'ds' || !hasKey)) {
+    return { zh: cached.zh, en: cached.en, source: cached.src === 'ds' ? 'ai' : 'nmt' };
+  }
 
   const safeInput = sanitizeSentenceInput(sentence);
   if (!safeInput) return null;
 
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 6500);
+  const timer = window.setTimeout(() => controller.abort(), 8000);
 
   try {
     const apiKey = getParentApiKey();
     if (apiKey) {
       const fromAi = await translateViaDeepSeek(safeInput, apiKey, controller.signal);
       if (fromAi) {
-        writeCacheEntry(sentence, fromAi);
-        return fromAi;
+        writeCacheEntry(sentence, { zh: fromAi.zh, en: fromAi.en, src: 'ds' });
+        return { zh: fromAi.zh, en: fromAi.en, source: 'ai' };
       }
+    }
+
+    if (cached) {
+      return { zh: cached.zh, en: cached.en, source: 'nmt' };
     }
 
     const fromFreeNmt = await Promise.any([
@@ -287,102 +449,127 @@ export async function translateSentenceWithAi(sentence: string): Promise<string 
       translateViaGtx(safeInput, controller.signal),
     ]);
     if (fromFreeNmt) {
-      writeCacheEntry(sentence, fromFreeNmt);
-      return fromFreeNmt;
+      writeCacheEntry(sentence, { zh: fromFreeNmt, src: 'nmt' });
+      return { zh: fromFreeNmt, source: 'nmt' };
     }
     return null;
   } catch {
-    return null;
+    return cached ? { zh: cached.zh, en: cached.en, source: 'nmt' } : null;
   } finally {
     window.clearTimeout(timer);
   }
 }
 
 /**
- * 整页批量预翻译：拍完一页后，把本页未命中本地语法的句子提前译好写入缓存。
+ * 性价比核心：整页 1 次紧凑批处理完成「OCR 残句修复 + 乱码剔除 + 上下文精翻」。
+ * - 跳过固定问候句（matchExactSentence）与已有 DeepSeek 缓存，绝不多花 1 个 token；
+ * - 仅传 [["s0","..."]] 紧凑数组，且无误句省略 en 字段，单页仅约 250~500 token。
  */
-export async function pretranslatePageSentences(sentences: readonly string[]): Promise<void> {
-  if (sentences.length === 0) return;
-
-  const dict = await loadZhDict();
-  const lookupMeaning = createWordLookup(dict);
-
-  const pending: string[] = [];
-  const seen = new Set<string>();
-
-  for (const raw of sentences) {
-    const key = normalizeSentenceKey(raw);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-
-    if (getCachedTranslation(raw)) continue;
-    if (matchHighConfidenceTemplate(raw, lookupMeaning)) continue;
-
-    const safe = sanitizeSentenceInput(raw);
-    if (safe) pending.push(safe);
-    if (pending.length >= 10) break;
-  }
-
-  if (pending.length === 0) return;
+export function pretranslatePageBatch(
+  items: readonly PageBatchItemInput[],
+): Promise<PageBatchRefineResult[]> {
+  if (items.length === 0) return Promise.resolve([]);
 
   const apiKey = getParentApiKey();
+  const pending: PageBatchItemInput[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const item of items) {
+    const key = normalizeSentenceKey(item.text);
+    if (!key || seenKeys.has(key)) continue;
+    seenKeys.add(key);
+
+    if (matchExactSentence(item.text)) continue;
+    const cached = getCachedEntry(item.text);
+    if (cached && (cached.src === 'ds' || !apiKey)) continue;
+
+    const safe = sanitizeSentenceInput(item.text);
+    if (safe) pending.push({ id: item.id, text: safe });
+    if (pending.length >= 16) break;
+  }
+
+  if (pending.length === 0) return Promise.resolve([]);
+
   if (!apiKey) {
-    // 未配 Key 时并发预热前 5 条免配置神经翻译
-    await Promise.allSettled(pending.slice(0, 5).map((item) => translateSentenceWithAi(item)));
-    return;
+    // 未配 Key 时并发预热前 5 条免配置翻译
+    return Promise.allSettled(
+      pending.slice(0, 5).map((item) => translateSentenceWithAi(item.text)),
+    ).then(() => []);
   }
 
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 12000);
+  const runPromise = (async (): Promise<PageBatchRefineResult[]> => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 14000);
 
-  try {
-    const response = await fetch(DEEPSEEK_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: 'deepseek-chat',
-        temperature: 0.1,
-        max_tokens: 600,
-        messages: [
-          {
-            role: 'system',
-            content:
-              '你是一位中国小学英语老师。请将输入的 JSON 英文句子数组逐条翻译成自然、准确、适合小学生的简体中文。严格只输出 JSON 数组格式（例如 ["译文1", "译文2"]），数组长度必须与输入完全一致。',
-          },
-          {
-            role: 'user',
-            content: JSON.stringify(pending),
-          },
-        ],
-      }),
-    });
+    try {
+      const compactInput = pending.map((p) => [p.id, p.text]);
+      const response = await fetch(DEEPSEEK_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          temperature: 0.1,
+          max_tokens: 900,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: BATCH_SYSTEM_PROMPT },
+            { role: 'user', content: JSON.stringify(compactInput) },
+          ],
+        }),
+      });
 
-    if (!response.ok) return;
-    const payload = (await response.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const content = (payload.choices?.[0]?.message?.content ?? '')
-      .replace(/^```(?:json)?\s*/m, '')
-      .replace(/```\s*$/m, '')
-      .trim();
+      if (!response.ok) return [];
+      const payload = (await response.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const content = (payload.choices?.[0]?.message?.content ?? '')
+        .replace(/^```(?:json)?\s*/m, '')
+        .replace(/```\s*$/m, '')
+        .trim();
 
-    const parsed = JSON.parse(content) as unknown;
-    if (!Array.isArray(parsed)) return;
+      const parsed = JSON.parse(content) as {
+        items?: { id?: unknown; en?: unknown; zh?: unknown; drop?: unknown }[];
+      };
+      if (!Array.isArray(parsed.items)) return [];
 
-    for (let i = 0; i < pending.length; i += 1) {
-      const item = parsed[i];
-      if (typeof item === 'string') {
-        const valid = validateChineseOutput(item);
-        if (valid) writeCacheEntry(pending[i]!, valid);
+      const byId = new Map(pending.map((p) => [p.id, p.text]));
+      const results: PageBatchRefineResult[] = [];
+
+      for (const rawItem of parsed.items) {
+        if (typeof rawItem.id !== 'string') continue;
+        const originalText = byId.get(rawItem.id);
+        if (!originalText) continue;
+
+        if (rawItem.drop === true) {
+          results.push({ id: rawItem.id, originalText, drop: true });
+          continue;
+        }
+
+        const zh = typeof rawItem.zh === 'string' ? validateChineseOutput(rawItem.zh) : null;
+        const en = validateRepairedEnglish(rawItem.en);
+        if (zh) {
+          writeCacheEntry(originalText, { zh, en, src: 'ds' });
+          results.push({ id: rawItem.id, originalText, correctedEn: en, zh });
+        }
       }
+
+      return results;
+    } catch {
+      return [];
+    } finally {
+      window.clearTimeout(timer);
     }
-  } catch {
-    // 后台预热静默失败，不影响点读
-  } finally {
-    window.clearTimeout(timer);
-  }
+  })();
+
+  inFlightBatchPromise = runPromise;
+  void runPromise.finally(() => {
+    if (inFlightBatchPromise === runPromise) {
+      inFlightBatchPromise = null;
+    }
+  });
+  return runPromise;
 }

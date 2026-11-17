@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getParentApiKey, setParentApiKey } from '../../content/translate';
+import { getParentApiKey, setParentApiKey, testParentApiKey } from '../../content/translate';
 import { importVocabFile, listItems, putItem, toVocabFile } from '../../data/vocab-db';
 import { dueItems, grade, todayISO, type ReviewItem } from '../../domain/review';
 import { speakEnglish } from '../../speech/speak';
@@ -10,7 +10,8 @@ export function ReviewPanel() {
   const [note, setNote] = useState<string | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState(() => getParentApiKey());
   const [showKey, setShowKey] = useState(false);
-  const [keyStatus, setKeyStatus] = useState<string | null>(null);
+  const [testingKey, setTestingKey] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
   const reload = async () => {
     const items = await listItems();
@@ -64,11 +65,21 @@ export function ReviewPanel() {
   const handleSaveKey = (event: React.FormEvent) => {
     event.preventDefault();
     setParentApiKey(apiKeyInput);
-    setKeyStatus(
-      apiKeyInput.trim()
-        ? '✅ 已保存在本台设备，点读长句将启用精准翻译。'
+    setKeyStatus({
+      ok: true,
+      text: apiKeyInput.trim()
+        ? '✅ 已保存在本机，建议点右侧「验证测试」确认连通。'
         : '已清除本机翻译密钥，仅使用离线句型与词典。',
-    );
+    });
+  };
+
+  const handleTestKey = async () => {
+    setParentApiKey(apiKeyInput);
+    setTestingKey(true);
+    setKeyStatus({ ok: true, text: '正在测试 DeepSeek 接口连通性…' });
+    const res = await testParentApiKey(apiKeyInput);
+    setTestingKey(false);
+    setKeyStatus({ ok: res.ok, text: res.message });
   };
 
   return (
@@ -126,7 +137,7 @@ export function ReviewPanel() {
               本机整句 AI 翻译密钥（DeepSeek API Key）
             </label>
             <p id="deepseek-key-hint" className="footnote">
-              密钥只保存在这台 iPad 浏览器本地，不上传代码仓。填好后可结合上下文精准翻译复杂长句。
+              密钥只保存在当前打开方式的浏览器本地（注意：Safari 网页版与桌面 PWA 图标存储空间相互独立）。
             </p>
             <div className="parent-key-row">
               <input
@@ -159,13 +170,20 @@ export function ReviewPanel() {
               <button type="submit" className="primary">
                 保存在本机
               </button>
+              <button
+                type="button"
+                disabled={testingKey || !apiKeyInput.trim()}
+                onClick={() => void handleTestKey()}
+              >
+                {testingKey ? '测试中…' : '验证测试'}
+              </button>
               {apiKeyInput.trim() ? (
                 <button
                   type="button"
                   onClick={() => {
                     setApiKeyInput('');
                     setParentApiKey('');
-                    setKeyStatus('已清除本机翻译密钥。');
+                    setKeyStatus({ ok: true, text: '已清除本机翻译密钥。' });
                   }}
                 >
                   清除密钥
@@ -173,8 +191,12 @@ export function ReviewPanel() {
               ) : null}
             </div>
             {keyStatus ? (
-              <p className="footnote parent-key-status" role="status" aria-live="polite">
-                {keyStatus}
+              <p
+                className={`footnote parent-key-status${keyStatus.ok ? '' : ' is-error'}`}
+                role="status"
+                aria-live="polite"
+              >
+                {keyStatus.text}
               </p>
             ) : null}
           </form>

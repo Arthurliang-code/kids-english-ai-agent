@@ -5,6 +5,7 @@ import {
   buildSentences,
   buildSentenceWordBreakdown,
   findSentenceForWord,
+  matchExactSentence,
   matchHighConfidenceTemplate,
 } from './sentence.ts';
 import { recoverPronounI } from './text.ts';
@@ -104,6 +105,8 @@ void test('matchHighConfidenceTemplate 把课本样张与常见主谓宾/系表/
     matchHighConfidenceTemplate('Look at the yellow banana.', lookup),
     '看那根黄色的香蕉。',
   );
+  assert.equal(matchExactSentence('How are you?'), '你好吗？');
+  assert.equal(matchExactSentence('She goes to school on foot every day.'), null);
   assert.equal(
     matchHighConfidenceTemplate('She goes to school on foot every day.', lookup),
     '她每天步行去上学。',

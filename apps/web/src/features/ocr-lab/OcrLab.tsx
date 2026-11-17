@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OcrResult, OcrSentence, OcrWord } from '@kea/shared-types';
-import { pretranslatePageSentences } from '../../content/translate';
+import { pretranslatePageBatch } from '../../content/translate';
 import { loadLexicon, lookupWord } from '../../domain/lexicon';
 import { buildSentences, findSentenceForWord } from '../../domain/sentence';
 import { isTrusted } from '../../platform/core/classify';
@@ -106,8 +106,30 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       setResult({ ...run.result, words, sentences });
       setStatus('done');
 
-      const trustedSentenceTexts = sentences.filter((s) => s.trusted).map((s) => s.text);
-      void pretranslatePageSentences(trustedSentenceTexts);
+      const trustedSentences = sentences.filter((s) => s.trusted).map((s) => ({ id: s.id, text: s.text }));
+      void pretranslatePageBatch(trustedSentences).then((refinements) => {
+        if (id !== runId.current || refinements.length === 0) return;
+        const refineMap = new Map(refinements.map((r) => [r.id, r]));
+        setResult((prev) => {
+          if (!prev?.sentences) return prev;
+          const nextSentences = prev.sentences.map((s) => {
+            const ref = refineMap.get(s.id);
+            if (!ref) return s;
+            if (ref.drop) return { ...s, trusted: false };
+            if (ref.correctedEn) return { ...s, text: ref.correctedEn };
+            return s;
+          });
+          return { ...prev, sentences: nextSentences };
+        });
+        setSelectedSentence((prev) => {
+          if (!prev) return prev;
+          const ref = refineMap.get(prev.id);
+          if (!ref) return prev;
+          if (ref.drop) return null;
+          if (ref.correctedEn) return { ...prev, text: ref.correctedEn };
+          return prev;
+        });
+      });
     } catch {
       if (id !== runId.current) return;
       setError('这一页看不清，再拍一次吧。');

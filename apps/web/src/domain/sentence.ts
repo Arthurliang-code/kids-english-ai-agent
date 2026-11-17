@@ -489,6 +489,11 @@ const EXACT_SENTENCES: Record<string, string> = {
   'look at the yellow banana.': '看那根黄色的香蕉。',
 };
 
+/** 精确命中无歧义固定高频句，无需消耗在线翻译/大模型 Token */
+export function matchExactSentence(sentence: string): string | null {
+  return EXACT_SENTENCES[normalizeSentenceKey(sentence)] ?? null;
+}
+
 /** 针对儿童教材优化的核心词精准单义表（解决词典首义不合语境问题） */
 const KID_WORD_GLOSS: Record<string, string> = {
   i: '我',

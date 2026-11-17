@@ -88,16 +88,18 @@ export function SentenceCard({
         setTakeUrl(objectUrl);
       }
 
-      if (!localRes.translation) {
+      if (localRes.needsAiUpgrade) {
         setAiLoading(true);
-        const aiText = await translateSentenceWithAi(sentence.text);
+        const aiResult = await translateSentenceWithAi(sentence.text);
         if (cancelled) return;
         setAiLoading(false);
-        if (aiText) {
+        if (aiResult) {
           setTransResult({
             ...localRes,
-            translation: aiText,
-            source: 'ai',
+            correctedEn: aiResult.en,
+            translation: aiResult.zh,
+            source: aiResult.source,
+            needsAiUpgrade: false,
           });
         }
       }
@@ -124,7 +126,7 @@ export function SentenceCard({
     }
     audioRef.current?.pause();
     setPlayingTake(false);
-    speakSentence(sentence.text, {
+    speakSentence(transResult?.correctedEn ?? sentence.text, {
       accent: chosen,
       slow,
       onWordIndex: onSpeakingWordIndexChange,
@@ -261,24 +263,43 @@ export function SentenceCard({
 
       <div className="word-sense-meaning-box sentence-translation-box">
         <span className="word-sense-badge">句意</span>
-        {aiLoading ? (
-          <p className="word-card-meaning is-loading">正在翻译整句…</p>
-        ) : transResult?.translation ? (
-          <p className="word-card-meaning">{transResult.translation}</p>
-        ) : transResult && transResult.breakdown.length > 0 ? (
-          <div className="sentence-breakdown-inline">
-            <p className="sentence-breakdown-note">重点词义提示（点上方英文词可看详情）：</p>
-            <div className="sentence-breakdown-chips">
-              {transResult.breakdown.map((item) => (
-                <span key={item.word} className="breakdown-chip">
-                  <strong lang="en">{item.word}</strong> {item.meaning}
-                </span>
-              ))}
+        <div className="sentence-meaning-content">
+          {transResult?.correctedEn &&
+          transResult.correctedEn.toLowerCase() !== sentence.text.toLowerCase() ? (
+            <p className="sentence-repaired-en" lang="en">
+              ✨ 校对整句：{transResult.correctedEn}
+            </p>
+          ) : null}
+          {transResult?.translation ? (
+            <div className="sentence-zh-row">
+              <p className="word-card-meaning">{transResult.translation}</p>
+              <span className={`trans-source-tag src-${transResult.source}`}>
+                {aiLoading
+                  ? '⏳ AI精翻中…'
+                  : transResult.source === 'ai'
+                    ? '✨ AI精翻'
+                    : transResult.source === 'template'
+                      ? '⚡ 常用句'
+                      : '🌐 基础翻译'}
+              </span>
             </div>
-          </div>
-        ) : (
-          <p className="word-card-meaning">点上方单词可逐个听读音、看解释</p>
-        )}
+          ) : aiLoading ? (
+            <p className="word-card-meaning is-loading">正在 AI 精翻整句…</p>
+          ) : transResult && transResult.breakdown.length > 0 ? (
+            <div className="sentence-breakdown-inline">
+              <p className="sentence-breakdown-note">重点词义提示（点上方英文词可看详情）：</p>
+              <div className="sentence-breakdown-chips">
+                {transResult.breakdown.map((item) => (
+                  <span key={item.word} className="breakdown-chip">
+                    <strong lang="en">{item.word}</strong> {item.meaning}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="word-card-meaning">点上方单词可逐个听读音、看解释</p>
+          )}
+        </div>
       </div>
 
       {transResult?.translation && transResult.breakdown.length > 0 ? (
