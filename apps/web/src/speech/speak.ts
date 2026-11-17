@@ -58,9 +58,28 @@ export function warmVoices(): void {
   });
 }
 
-function buildDictVoiceUrl(text: string, accent: EnglishAccent): string {
-  const type = accent === 'uk' ? '1' : '2';
-  return `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&type=${type}`;
+function isSingleWord(text: string): boolean {
+  return !/\s/.test(text.trim());
+}
+
+/**
+ * 构建国内高可用流畅语音 URL 列表（按优先级排列）：
+ * - 单词优先使用词典真人发音，失败自动切换至自然句读 TTS
+ * - 完整句子直接使用实测 0.45~0.60s 稳定返回音频的自然连贯 TTS（规避单词接口对长句报 HTTP 500 的问题）
+ */
+function buildAudioCandidates(text: string, accent: EnglishAccent, slow: boolean): string[] {
+  const encoded = encodeURIComponent(text);
+  const baiduLang = accent === 'uk' ? 'uk' : 'en';
+  const baiduSpeed = slow ? '2' : '3';
+  const baiduUrl = `https://fanyi.baidu.com/gettts?lan=${baiduLang}&text=${encoded}&spd=${baiduSpeed}&source=web`;
+
+  if (isSingleWord(text) && !slow) {
+    const youdaoType = accent === 'uk' ? '1' : '2';
+    const youdaoUrl = `https://dict.youdao.com/dictvoice?audio=${encoded}&type=${youdaoType}`;
+    return [youdaoUrl, baiduUrl];
+  }
+
+  return [baiduUrl];
 }
 
 interface WordSpan {
@@ -81,7 +100,8 @@ function computeWordSpans(text: string): WordSpan[] {
 
   while ((match = regex.exec(text)) !== null) {
     const token = match[0];
-    const weight = Math.max(2, token.replace(/[^A-Za-z]/g, '').length) + (/[,.?!;:]/.test(token) ? 2 : 0);
+    const weight =
+      Math.max(2, token.replace(/[^A-Za-z]/g, '').length) + (/[,.?!;:]/.test(token) ? 2 : 0);
     raw.push({
       index: idx,
       start: match.index,
@@ -115,8 +135,8 @@ function speakWithSynthesis(
   const spans = computeWordSpans(text);
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = accent === 'uk' ? 'en-GB' : 'en-US';
-  // 0.92 常速与 0.74 慢速可避免 WebKit 过度变速带来的机械电音感
-  utter.rate = slow ? 0.74 : 0.92;
+  // 保持自然语速区间，避免过低语速引发 WebKit 语音撕裂与机械感
+  utter.rate = slow ? 0.8 : 0.96;
   utter.pitch = 1;
 
   const voice = selectSystemVoice(accent);
@@ -154,7 +174,7 @@ function speakWithSynthesis(
       }
     };
 
-    const msPerWeight = slow ? 88 : 66;
+    const msPerWeight = slow ? 85 : 64;
     let elapsed = 100;
     for (const span of spans) {
       const delay = elapsed;
@@ -164,7 +184,7 @@ function speakWithSynthesis(
         }
       }, delay);
       timers.push(timerId);
-      elapsed += span.weight * msPerWeight + (slow ? 110 : 75);
+      elapsed += span.weight * msPerWeight + (slow ? 105 : 70);
     }
   }
 
@@ -178,8 +198,8 @@ function speakWithSynthesis(
 }
 
 /**
- * 优先使用国内直连真人/神经网络语音（支持纯正英音 type=1 / 美音 type=2），
- * 离线或加载超时（1.4s）时自动无缝降级到本机优选的高品质系统语音。
+ * 优先播放国内直连自然语音（英式 / 美式、单词 / 整句各自走最稳通道），
+ * 若所有在线通道均不可用或设备离线，自动降级至本机优选自然人声。
  */
 function playFluentAudioOrFallback(
   text: string,
@@ -199,30 +219,45 @@ function playFluentAudioOrFallback(
 
   const audio = getSharedAudio();
   const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine !== false;
+  const candidates = buildAudioCandidates(trimmed, accent, slow);
 
-  if (!audio || !isOnline || trimmed.length > 240) {
+  if (!audio || !isOnline || trimmed.length > 260 || candidates.length === 0) {
     speakWithSynthesis(trimmed, accent, slow, onWordIndex);
     return;
   }
 
   const spans = computeWordSpans(trimmed);
+  const targetRate = slow ? 0.82 : 1.0;
+  let candidateIdx = 0;
   let finished = false;
   let startedPlaying = false;
+  let loadTimer = 0;
 
-  const cleanupAudio = () => {
-    if (finished) return;
-    finished = true;
+  const detach = () => {
     window.clearTimeout(loadTimer);
     audio.removeEventListener('playing', handlePlaying);
     audio.removeEventListener('timeupdate', handleTimeUpdate);
     audio.removeEventListener('ended', handleEnded);
     audio.removeEventListener('error', handleError);
+  };
+
+  const cleanupAudio = () => {
+    if (finished) return;
+    finished = true;
+    detach();
     audio.pause();
     onWordIndex?.(null);
   };
 
-  const fallbackToSynthesis = () => {
+  const tryNextOrSynthesis = () => {
     if (finished) return;
+    window.clearTimeout(loadTimer);
+    candidateIdx += 1;
+    if (candidateIdx < candidates.length) {
+      startedPlaying = false;
+      startCandidate(candidates[candidateIdx]!);
+      return;
+    }
     cleanupAudio();
     speakWithSynthesis(trimmed, accent, slow, onWordIndex);
   };
@@ -230,6 +265,7 @@ function playFluentAudioOrFallback(
   const handlePlaying = () => {
     startedPlaying = true;
     window.clearTimeout(loadTimer);
+    audio.playbackRate = targetRate;
     if (onWordIndex && spans.length > 0) {
       onWordIndex(0);
     }
@@ -253,29 +289,33 @@ function playFluentAudioOrFallback(
   };
 
   const handleError = () => {
-    fallbackToSynthesis();
+    tryNextOrSynthesis();
+  };
+
+  const startCandidate = (url: string) => {
+    audio.pause();
+    audio.src = url;
+    audio.defaultPlaybackRate = targetRate;
+    audio.playbackRate = targetRate;
+
+    loadTimer = window.setTimeout(() => {
+      if (!startedPlaying) {
+        tryNextOrSynthesis();
+      }
+    }, 2400);
+
+    void audio.play().catch(() => {
+      tryNextOrSynthesis();
+    });
   };
 
   activeCleanup = cleanupAudio;
-
-  audio.pause();
-  audio.src = buildDictVoiceUrl(trimmed, accent);
-  audio.playbackRate = slow ? 0.78 : 1.0;
-
   audio.addEventListener('playing', handlePlaying);
   audio.addEventListener('timeupdate', handleTimeUpdate);
   audio.addEventListener('ended', handleEnded);
   audio.addEventListener('error', handleError);
 
-  const loadTimer = window.setTimeout(() => {
-    if (!startedPlaying) {
-      fallbackToSynthesis();
-    }
-  }, 1400);
-
-  void audio.play().catch(() => {
-    fallbackToSynthesis();
-  });
+  startCandidate(candidates[0]!);
 }
 
 /**

@@ -95,12 +95,54 @@ export async function preprocess(
   if (config.grayscale) {
     const imageData = ctx.getImageData(0, 0, width, height);
     const pixels = imageData.data;
+    const hist = new Uint32Array(256);
+
     for (let i = 0; i < pixels.length; i += 4) {
       const gray = (pixels[i]! * 77 + pixels[i + 1]! * 150 + pixels[i + 2]! * 29) >> 8;
       pixels[i] = gray;
       pixels[i + 1] = gray;
       pixels[i + 2] = gray;
+      hist[gray] = (hist[gray] ?? 0) + 1;
     }
+
+    // 自适应对比度拉伸：只对发灰或低对比度拍照生效，清晰纯黑白截图保持原样
+    const totalPixels = pixels.length / 4;
+    const lowTarget = Math.floor(totalPixels * 0.015);
+    const highTarget = Math.floor(totalPixels * 0.92);
+    let acc = 0;
+    let lowVal = 0;
+    let highVal = 255;
+    for (let v = 0; v < 256; v += 1) {
+      acc += hist[v] ?? 0;
+      if (acc >= lowTarget) {
+        lowVal = v;
+        break;
+      }
+    }
+    acc = 0;
+    for (let v = 0; v < 256; v += 1) {
+      acc += hist[v] ?? 0;
+      if (acc >= highTarget) {
+        highVal = v;
+        break;
+      }
+    }
+
+    if (highVal - lowVal >= 28 && (lowVal > 14 || highVal < 238)) {
+      const lut = new Uint8Array(256);
+      const span = highVal - lowVal;
+      for (let v = 0; v < 256; v += 1) {
+        const mapped = Math.round(((v - lowVal) * 255) / span);
+        lut[v] = mapped < 0 ? 0 : mapped > 255 ? 255 : mapped;
+      }
+      for (let i = 0; i < pixels.length; i += 4) {
+        const g = lut[pixels[i]!] ?? pixels[i]!;
+        pixels[i] = g;
+        pixels[i + 1] = g;
+        pixels[i + 2] = g;
+      }
+    }
+
     ctx.putImageData(imageData, 0, 0);
   }
 

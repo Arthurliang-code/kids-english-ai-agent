@@ -69,10 +69,147 @@ interface LineGroup {
   lineId: string;
   words: OcrWord[];
   quad: Quad;
+  startsNewItem: boolean;
+  isHeading: boolean;
+  optionCutoffX: number | null;
+}
+
+const KNOWN_ACRONYMS = /^(TV|PE|OK|UK|US|USA|CD|DVD|ID|IT)$/;
+const NEW_ITEM_PREFIX =
+  /^\s*(?:[—\-*•]?\s*\d{1,2}\s*[.)、]|[(（]\d{1,2}[)）]|part\s+\d+|unit\s+\d+|[A-Z][A-Za-z]{0,12}\s*[:：])/i;
+const HEADING_LINE =
+  /^\s*(?:(?:unit|lesson|module|chapter|part)\s+(?:\d+|[ivx]+)\b.*|word\s*list\s*)$/i;
+const OPTION_LINE = /^\s*[A-D]\.\s*\S+/i;
+const SPEAKER_TOKEN = /^[A-Z][:：]$/;
+const PAREN_NOISE = /^[（(].*[）)]$/;
+
+function defaultWordTrusted(word: OcrWord): boolean {
+  return word.lexiconHit && word.confidence >= 0.7;
+}
+
+/** 判断是否为单选题选项起点（如 A. / B. / A.sing / B.sings） */
+function isOptionMarker(word: OcrWord, nextWord: OcrWord | undefined): boolean {
+  const raw = (word.rawText ?? word.text).trim();
+  if (/^[A-D]\./i.test(raw)) return true;
+  if (/^[B-D]$/i.test(word.text) && nextWord !== undefined) return true;
+  return false;
+}
+
+/** 两个片段的 Y 轴重叠度（占较矮片段高度的比例） */
+function verticalOverlapRatio(a: LineGroup, b: LineGroup): number {
+  const aTop = a.quad[0].y;
+  const aBottom = a.quad[2].y;
+  const bTop = b.quad[0].y;
+  const bBottom = b.quad[2].y;
+  const overlap = Math.min(aBottom, bBottom) - Math.max(aTop, bTop);
+  const minH = Math.max(0.006, Math.min(aBottom - aTop, bBottom - bTop));
+  return overlap / minH;
+}
+
+/** 判断同一视觉行中两段是否有足够的 Y 轴重叠且水平相邻（允许填空下划线的间距） */
+function areOnSameVisualRow(prev: LineGroup, next: LineGroup): boolean {
+  if (verticalOverlapRatio(prev, next) < 0.35) return false;
+  const gapRight = next.quad[0].x - prev.quad[1].x;
+  const gapLeft = prev.quad[0].x - next.quad[1].x;
+  const gapX = Math.max(gapRight, gapLeft);
+  return gapX <= 0.22;
+}
+
+/** 判断一行是否为中文误识出的大写/碎字母乱码行 */
+function isLikelyChineseGibberish(words: readonly OcrWord[], rawLineText: string): boolean {
+  if (words.length === 0) return true;
+
+  // 若原行里包含多个连续纯小写常用英文词，通常不是中文误识
+  let cleanNormalWords = 0;
+  let allCapsOrTinyNoise = 0;
+
+  for (const w of words) {
+    const raw = (w.rawText ?? w.text).trim();
+    const isAllCaps = /^[A-Z.,:;!?]+$/.test(raw) && w.text.length >= 2;
+    const isHighRealWord =
+      w.lexiconHit &&
+      w.confidence >= 0.72 &&
+      !KNOWN_ACRONYMS.test(w.text) &&
+      !(isAllCaps && w.confidence < 0.88);
+
+    if (isHighRealWord && !isAllCaps) {
+      cleanNormalWords += 1;
+    }
+    if (isAllCaps && !KNOWN_ACRONYMS.test(w.text) && w.confidence < 0.88) {
+      allCapsOrTinyNoise += 1;
+    }
+  }
+
+  // 检查原始行中是否有大量非字母碎片
+  const rawChunks = rawLineText
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !/^\d+[.)、]?$/.test(s));
+
+  if (allCapsOrTinyNoise >= 2 && cleanNormalWords <= 1) return true;
+  if (rawChunks.length >= 4 && cleanNormalWords / rawChunks.length < 0.35) return true;
+  if (words.length >= 2 && cleanNormalWords === 0 && !KNOWN_ACRONYMS.test(words[0]!.text)) {
+    return true;
+  }
+
+  return false;
+}
+
+/** 从原行文本估计是否有 "[.?!] A. xxx B. xxx" 选择题选项的起点比例 */
+function detectInlineOptionCutoff(rawText: string, lineQuad: Quad): number | null {
+  const m = /^(.*?[.?!])\s+([A-D]\.\s*\S+.*)$/.exec(rawText);
+  if (!m || !m[1]) return null;
+  const lineW = lineQuad[1].x - lineQuad[0].x;
+  if (lineW <= 0) return null;
+  const ratio = m[1].length / Math.max(1, rawText.length);
+  return lineQuad[0].x + lineW * (ratio + 0.015);
+}
+
+function cleanRowWords(
+  words: readonly OcrWord[],
+  optionCutoffX: number | null,
+  isWordTrusted: (word: OcrWord) => boolean,
+): OcrWord[] {
+  const out: OcrWord[] = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i]!;
+    const raw = (w.rawText ?? w.text).trim();
+
+    if (optionCutoffX !== null && w.quad[0].x >= optionCutoffX) {
+      break;
+    }
+    if (i === 0 && SPEAKER_TOKEN.test(raw)) {
+      continue;
+    }
+    if (out.length >= 3 && isOptionMarker(w, words[i + 1])) {
+      break;
+    }
+    // 跳过如 "(BASES)"、"(RATES)" 这类行尾括号中文误识碎片
+    if (PAREN_NOISE.test(raw) && (/^[（(][A-Z]+[）)]$/.test(raw) || w.confidence < 0.78)) {
+      continue;
+    }
+    // 行尾独立的低置信全大写 2-5 字母碎片（如 EES / HA / RA）
+    if (
+      /^[A-Z]{2,5}[.,]?$/.test(raw) &&
+      !KNOWN_ACRONYMS.test(w.text) &&
+      w.confidence < 0.85 &&
+      out.length >= 2
+    ) {
+      continue;
+    }
+    if (/^[a-z]{1,2}[A-Z]{1,3}[.,?!]*$/.test(raw)) {
+      continue;
+    }
+    if (w.lexiconHit || isWordTrusted(w)) {
+      out.push(w);
+    }
+  }
+  return out;
 }
 
 function shouldMergeWrappedLine(prev: LineGroup, next: LineGroup): boolean {
-  if (prev.words.length < 3 || next.words.length === 0) return false;
+  if (prev.words.length < 2 || next.words.length === 0) return false;
+  if (prev.isHeading || next.isHeading || next.startsNewItem) return false;
 
   const lastWord = prev.words[prev.words.length - 1]!;
   const { endsSentence } = formatTokenWithPunctuation(lastWord);
@@ -86,43 +223,38 @@ function shouldMergeWrappedLine(prev: LineGroup, next: LineGroup): boolean {
   const nextBottom = next.quad[2].y;
   const nextHeight = Math.max(0.008, nextBottom - nextTop);
 
+  // 字高差距超过 1.32 倍（例如 Unit 大标题与正文）绝不合并
   const heightRatio = Math.max(prevHeight, nextHeight) / Math.min(prevHeight, nextHeight);
-  if (heightRatio > 1.65) return false;
+  if (heightRatio > 1.32) return false;
 
   const verticalGap = nextTop - prevBottom;
-  if (verticalGap < -prevHeight * 0.4 || verticalGap > Math.max(prevHeight, nextHeight) * 1.35) {
+  if (verticalGap < -prevHeight * 0.35 || verticalGap > Math.max(prevHeight, nextHeight) * 1.25) {
     return false;
   }
 
   const leftDiff = Math.abs(next.quad[0].x - prev.quad[0].x);
-  if (leftDiff > 0.2) return false;
+  if (leftDiff > 0.16) return false;
 
   return true;
 }
 
-function defaultWordTrusted(word: OcrWord): boolean {
-  return word.lexiconHit && word.confidence >= 0.7;
-}
-
-/** 判断是否为单选题选项起点（如 A. / B. / C. / D.） */
-function isOptionMarker(word: OcrWord, nextWord: OcrWord | undefined): boolean {
-  const raw = (word.rawText ?? word.text).trim();
-  if (/^[A-D]\.$/i.test(raw)) return true;
-  if (/^[B-D]$/i.test(word.text) && nextWord !== undefined) return true;
-  return false;
-}
-
 /**
  * 从 OCR 词流与行信息中重组完整句子。
- * - 剔除行首尾由中文/手写产生的不可信乱码词，截断单选题 A/B/C 选项后缀
- * - 自动处理段落内跨行折行合并与同行多句切分
+ * - 先合并同一视觉横行上被 SPARSE_TEXT 切碎的词段
+ * - 识别题号、对话说话人、标题边界，过滤中文误识碎片与选择题选项
+ * - 处理段落内跨行折行合并与同行多句切分
  */
 export function buildSentences(
   words: readonly OcrWord[],
-  _lines: readonly OcrLine[] = [],
+  lines: readonly OcrLine[] = [],
   isWordTrusted: (word: OcrWord) => boolean = defaultWordTrusted,
 ): OcrSentence[] {
   if (words.length === 0) return [];
+
+  const metaByLineId = new Map<string, OcrLine>();
+  for (const l of lines) {
+    metaByLineId.set(l.id, l);
+  }
 
   const lineMap = new Map<string, OcrWord[]>();
   for (const word of words) {
@@ -134,54 +266,83 @@ export function buildSentences(
     }
   }
 
-  const rawLines: LineGroup[] = [];
+  // 1. 构造原始行片段，清理每段乱码并记录结构标记
+  const segments: LineGroup[] = [];
   for (const [lineId, lineWords] of lineMap.entries()) {
     const sorted = [...lineWords].sort((a, b) => a.indexInLine - b.indexInLine);
-    // 截断同行末尾的单选题选项 (A. xxx B. xxx C. xxx) 并过滤夹杂的非词库乱码
-    const cleanedLine: OcrWord[] = [];
-    for (let i = 0; i < sorted.length; i += 1) {
-      const w = sorted[i]!;
-      if (cleanedLine.length >= 3 && isOptionMarker(w, sorted[i + 1])) {
-        break;
-      }
-      if (w.lexiconHit || isWordTrusted(w)) {
-        cleanedLine.push(w);
-      }
-    }
-    if (cleanedLine.length === 0) continue;
+    const meta = metaByLineId.get(lineId);
+    const rawText = meta?.text?.trim() ?? sorted.map((w) => w.rawText ?? w.text).join(' ');
+    if (OPTION_LINE.test(rawText)) continue;
+    const lineQuad = meta?.quad ?? mergeQuads(sorted.map((w) => w.quad));
+    const optionCutoffX = detectInlineOptionCutoff(rawText, lineQuad);
 
-    rawLines.push({
+    const cleaned = cleanRowWords(sorted, optionCutoffX, isWordTrusted);
+    if (cleaned.length === 0) continue;
+    if (cleaned.length === 1 && cleaned[0]!.text.length === 1 && !/^[aI]$/.test(cleaned[0]!.text)) {
+      continue;
+    }
+    if (isLikelyChineseGibberish(cleaned, rawText)) continue;
+
+    segments.push({
       lineId,
-      words: cleanedLine,
-      quad: mergeQuads(cleanedLine.map((w) => w.quad)),
+      words: cleaned,
+      quad: mergeQuads(cleaned.map((w) => w.quad)),
+      startsNewItem: NEW_ITEM_PREFIX.test(rawText),
+      isHeading: HEADING_LINE.test(rawText),
+      optionCutoffX,
     });
   }
 
+  if (segments.length === 0) return [];
+
+  // 2. 按视觉坐标（Y 从上到下，同行 X 从左到右）排序并合并同一横行上的碎片
+  segments.sort((a, b) => a.quad[0].y - b.quad[0].y || a.quad[0].x - b.quad[0].x);
+
+  const visualRows: LineGroup[] = [];
+  for (const seg of segments) {
+    const prev = visualRows[visualRows.length - 1];
+    if (prev && areOnSameVisualRow(prev, seg)) {
+      const combined = [...prev.words, ...seg.words].sort((a, b) => a.quad[0].x - b.quad[0].x);
+      // 同行合并后再次检查选项截断 (例如行1题目 + 行2选项A)
+      const trimmed = cleanRowWords(combined, null, isWordTrusted);
+      if (trimmed.length > 0) {
+        prev.words = trimmed;
+        prev.quad = mergeQuads(trimmed.map((w) => w.quad));
+        prev.startsNewItem = prev.startsNewItem || seg.startsNewItem;
+        prev.isHeading = prev.isHeading || seg.isHeading;
+      }
+    } else {
+      visualRows.push({ ...seg, words: [...seg.words] });
+    }
+  }
+
+  // 3. 合并同一段落内的跨行折行（不跨题号、不跨标题、不跨句末标点）
   const mergedGroups: OcrWord[][] = [];
   let currentGroup: LineGroup | null = null;
 
-  for (const line of rawLines) {
+  for (const row of visualRows) {
     if (!currentGroup) {
-      currentGroup = { ...line, words: [...line.words] };
+      currentGroup = { ...row, words: [...row.words] };
       continue;
     }
 
-    if (shouldMergeWrappedLine(currentGroup, line)) {
-      const combinedWords: OcrWord[] = [...currentGroup.words, ...line.words];
+    if (shouldMergeWrappedLine(currentGroup, row)) {
+      const combinedWords: OcrWord[] = [...currentGroup.words, ...row.words];
       currentGroup = {
-        lineId: currentGroup.lineId,
+        ...currentGroup,
         words: combinedWords,
         quad: mergeQuads(combinedWords.map((w) => w.quad)),
       };
     } else {
       mergedGroups.push(currentGroup.words);
-      currentGroup = { ...line, words: [...line.words] };
+      currentGroup = { ...row, words: [...row.words] };
     }
   }
   if (currentGroup) {
     mergedGroups.push(currentGroup.words);
   }
 
+  // 4. 在行组内按句末标点切分独立句子
   const sentenceWordBuckets: OcrWord[][] = [];
   for (const groupWords of mergedGroups) {
     let buffer: OcrWord[] = [];
@@ -200,6 +361,7 @@ export function buildSentences(
     }
   }
 
+  // 5. 生成 OcrSentence 与可信判定
   const sentences: OcrSentence[] = [];
   for (const bucket of sentenceWordBuckets) {
     if (bucket.length === 0) continue;
@@ -207,16 +369,18 @@ export function buildSentences(
     const tokens = bucket.map((w) => formatTokenWithPunctuation(w).token);
     let text = tokens.join(' ');
     if (!/[.?!]$/.test(text)) {
-      text = `${text}.`;
+      text = `${text.replace(/[,;:]+$/, '')}.`;
     }
     text = text.charAt(0).toUpperCase() + text.slice(1);
 
     const totalConfidence = bucket.reduce((sum, w) => sum + w.confidence, 0);
     const avgConfidence = totalConfidence / bucket.length;
-    const trustedWordCount = bucket.filter(isWordTrusted).length;
-    const trustedRatio = trustedWordCount / bucket.length;
+    const realWordCount = bucket.filter(
+      (w) => isWordTrusted(w) && (w.text.length >= 2 || /^[aI]$/.test(w.text)),
+    ).length;
+    const trustedRatio = realWordCount / bucket.length;
 
-    const trusted = bucket.length >= 2 && trustedWordCount >= 1 && trustedRatio >= 0.6;
+    const trusted = bucket.length >= 2 && realWordCount >= 2 && trustedRatio >= 0.7;
 
     sentences.push({
       id: `s${sentences.length}`,

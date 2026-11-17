@@ -2,7 +2,7 @@ import Tesseract from 'tesseract.js';
 import type { Worker as TesseractWorker } from 'tesseract.js';
 import type { OcrLine, OcrResult, OcrWord, PixelBox, Quad } from '@kea/shared-types';
 import type { OcrEngine, OcrEngineProgress, OcrInput, OcrEngineRun } from '../../core/types';
-import { normalizeEnglishToken } from '../../../domain/text';
+import { normalizeEnglishToken, recoverPronounI } from '../../../domain/text';
 
 /**
  * 静态资源放在 public/tesseract，避免依赖 jsdelivr 等境外 CDN。
@@ -154,8 +154,17 @@ export class TesseractEngine implements OcrEngine {
               quad: rectToQuad(line.bbox, width, height),
             });
 
-            for (const word of line.words) {
-              const normalized = normalizeEnglishToken(word.text);
+            for (let wi = 0; wi < line.words.length; wi += 1) {
+              const word = line.words[wi]!;
+              const nextWord = line.words[wi + 1];
+              let normalized = normalizeEnglishToken(word.text);
+              let rawText = word.text.trim();
+
+              if (!normalized && recoverPronounI(word.text, nextWord?.text)) {
+                normalized = 'I';
+                rawText = 'I';
+              }
+
               if (!normalized) {
                 if (word.text.trim().length > 0) filteredCount += 1;
                 continue;
@@ -164,7 +173,7 @@ export class TesseractEngine implements OcrEngine {
               words.push({
                 id: `${lineId}-w${indexInLine}`,
                 text: normalized,
-                rawText: word.text.trim(),
+                rawText,
                 confidence: Math.max(0, Math.min(1, word.confidence / 100)),
                 quad: rectToQuad(word.bbox, width, height),
                 lineId,

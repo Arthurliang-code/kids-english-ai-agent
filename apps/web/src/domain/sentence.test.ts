@@ -7,6 +7,7 @@ import {
   findSentenceForWord,
   matchHighConfidenceTemplate,
 } from './sentence.ts';
+import { recoverPronounI } from './text.ts';
 
 function makeQuad(x0: number, y0: number, x1: number, y1: number): Quad {
   return [
@@ -149,4 +150,59 @@ void test('buildSentenceWordBreakdown 提取句中重点实词词义', () => {
     { word: 'reading', meaning: '读书' },
     { word: 'book', meaning: '书' },
   ]);
+});
+
+void test('buildSentences 同横行碎片合并且大标题与题号行不粘连，支持竖线恢复为 I', () => {
+  assert.equal(recoverPronounI('|', 'have'), true);
+  assert.equal(recoverPronounI('|', 'Zzons'), false);
+
+  const lines = [
+    { id: 'l0', text: 'Unit 3 My Family', confidence: 0.94, quad: makeQuad(0.1, 0.08, 0.45, 0.14) },
+    { id: 'l1', text: 'This is my family.', confidence: 0.95, quad: makeQuad(0.1, 0.18, 0.4, 0.22) },
+    { id: 'l2', text: '2. They are', confidence: 0.95, quad: makeQuad(0.1, 0.28, 0.24, 0.315) },
+    {
+      id: 'l3',
+      text: 'cleaning the classroom. (BASES)',
+      confidence: 0.92,
+      quad: makeQuad(0.25, 0.275, 0.62, 0.312),
+    },
+    { id: 'l4', text: 'B: I went with my sister.', confidence: 0.95, quad: makeQuad(0.1, 0.36, 0.48, 0.395) },
+  ];
+
+  const words: OcrWord[] = [
+    makeWord('l0-w0', 'l0', 0, 'Unit', 'Unit', makeQuad(0.1, 0.08, 0.2, 0.14)),
+    makeWord('l0-w1', 'l0', 1, 'My', 'My', makeQuad(0.22, 0.08, 0.3, 0.14)),
+    makeWord('l0-w2', 'l0', 2, 'Family', 'Family', makeQuad(0.32, 0.08, 0.45, 0.14)),
+
+    makeWord('l1-w0', 'l1', 0, 'This', 'This', makeQuad(0.1, 0.18, 0.18, 0.22)),
+    makeWord('l1-w1', 'l1', 1, 'is', 'is', makeQuad(0.2, 0.18, 0.24, 0.22)),
+    makeWord('l1-w2', 'l1', 2, 'my', 'my', makeQuad(0.26, 0.18, 0.31, 0.22)),
+    makeWord('l1-w3', 'l1', 3, 'family', 'family.', makeQuad(0.32, 0.18, 0.4, 0.22)),
+
+    makeWord('l2-w0', 'l2', 0, 'They', 'They', makeQuad(0.14, 0.28, 0.2, 0.315)),
+    makeWord('l2-w1', 'l2', 1, 'are', 'are', makeQuad(0.21, 0.28, 0.24, 0.315)),
+
+    makeWord('l3-w0', 'l3', 0, 'cleaning', 'cleaning', makeQuad(0.25, 0.275, 0.36, 0.312)),
+    makeWord('l3-w1', 'l3', 1, 'the', 'the', makeQuad(0.37, 0.275, 0.41, 0.312)),
+    makeWord('l3-w2', 'l3', 2, 'classroom', 'classroom.', makeQuad(0.42, 0.275, 0.54, 0.312)),
+    makeWord('l3-w3', 'l3', 3, 'BASES', '(BASES)', makeQuad(0.55, 0.275, 0.62, 0.312), true, 0.65),
+
+    makeWord('l4-w0', 'l4', 0, 'B', 'B:', makeQuad(0.1, 0.36, 0.13, 0.395)),
+    makeWord('l4-w1', 'l4', 1, 'I', 'I', makeQuad(0.14, 0.36, 0.16, 0.395)),
+    makeWord('l4-w2', 'l4', 2, 'went', 'went', makeQuad(0.17, 0.36, 0.23, 0.395)),
+    makeWord('l4-w3', 'l4', 3, 'with', 'with', makeQuad(0.24, 0.36, 0.3, 0.395)),
+    makeWord('l4-w4', 'l4', 4, 'my', 'my', makeQuad(0.31, 0.36, 0.36, 0.395)),
+    makeWord('l4-w5', 'l4', 5, 'sister', 'sister.', makeQuad(0.37, 0.36, 0.48, 0.395)),
+  ];
+
+  const sents = buildSentences(words, lines);
+  assert.deepEqual(
+    sents.filter((s) => s.trusted).map((s) => s.text),
+    [
+      'Unit My Family.',
+      'This is my family.',
+      'They are cleaning the classroom.',
+      'I went with my sister.',
+    ],
+  );
 });
