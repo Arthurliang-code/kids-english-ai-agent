@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { OcrSentence, OcrWord } from '@kea/shared-types';
 import { enrichSense, resolveSense } from '../../content/lookup';
 import {
-  hasParentApiKey,
   resolveSentenceLocal,
   translateSentenceWithAi,
   type SentenceTranslationResult,
@@ -170,7 +169,7 @@ export function WordCard({
       if (cancelled) return;
       setSentenceTrans(localRes);
 
-      if (!localRes.translation && hasParentApiKey()) {
+      if (!localRes.translation) {
         setSentenceLoading(true);
         const aiText = await translateSentenceWithAi(activeSentenceText);
         if (cancelled) return;

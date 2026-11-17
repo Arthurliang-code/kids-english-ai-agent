@@ -10,24 +10,24 @@ import {
 } from '../domain/sentence';
 
 const API_KEY_STORAGE = 'kea.parent.deepseek_key';
-const CACHE_STORAGE = 'kea.sentence.cache.v1';
-const MAX_CACHE_ENTRIES = 400;
+const CACHE_STORAGE = 'kea.sentence.cache.v2';
+const MAX_CACHE_ENTRIES = 500;
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/chat/completions';
 
-const UNSAFE_ZH = /赌博|色情|暴力|自杀|毒品|脏话|杀害/;
+const UNSAFE_ZH = /赌博|色情|暴力|自杀|毒品|脏话|杀害|mymemory|warning|quota/i;
 
 export type TranslationSource = 'template' | 'ai' | 'cached' | 'breakdown';
 
 export interface SentenceTranslationResult {
   sentence: string;
-  /** 完整自然中文译文；若未配置密钥且未命中固定句型则为 null，绝不乱拼误导 */
+  /** 完整自然中文译文 */
   translation: string | null;
   source: TranslationSource;
-  /** 句中重点实词词义拆解（始终提供，供精读与离线辅助） */
+  /** 句中重点实词词义拆解 */
   breakdown: WordGlossItem[];
 }
 
-/* ---------- 家长本机 API Key 管理（仅保存在本台 iPad localStorage，绝不进代码库） ---------- */
+/* ---------- 家长本机 API Key 管理 ---------- */
 
 export function getParentApiKey(): string {
   try {
@@ -103,7 +103,7 @@ export function getCachedTranslation(sentence: string): string | null {
   return readCache()[key] ?? null;
 }
 
-/* ---------- 安全清洗与校验（防 Prompt 注入与异常输出） ---------- */
+/* ---------- 安全清洗与校验 ---------- */
 
 function sanitizeSentenceInput(raw: string): string | null {
   const cleaned = raw
@@ -149,7 +149,7 @@ function tokenizeSentenceWords(sentence: string): string[] {
 }
 
 /**
- * 第一步：纯本机秒级解析（查缓存 -> 查高置信小学句型 -> 生成重点词拆解）
+ * 第一步：纯本机秒级解析（查缓存 -> 查本地整句语法与句型引擎 -> 提取重点词）
  */
 export async function resolveSentenceLocal(sentence: string): Promise<SentenceTranslationResult> {
   const dict = await loadZhDict();
@@ -185,22 +185,43 @@ export async function resolveSentenceLocal(sentence: string): Promise<SentenceTr
   };
 }
 
-/**
- * 第二步：当本机配置了 DeepSeek API Key 时，调用大模型做语境精准翻译并永久缓存
- */
-export async function translateSentenceWithAi(sentence: string): Promise<string | null> {
-  const cached = getCachedTranslation(sentence);
-  if (cached) return cached;
+/** 免配置在线神经网络翻译通道 A：MyMemory NMT */
+async function translateViaMyMemory(safeInput: string, signal: AbortSignal): Promise<string> {
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(safeInput)}&langpair=en|zh-CN`;
+  const resp = await fetch(url, { signal });
+  if (!resp.ok) throw new Error('MyMemory HTTP error');
+  const data = (await resp.json()) as {
+    responseStatus?: number;
+    responseData?: { translatedText?: string };
+  };
+  const valid = validateChineseOutput(data.responseData?.translatedText ?? '');
+  if (!valid) throw new Error('Invalid MyMemory output');
+  return valid;
+}
 
-  const safeInput = sanitizeSentenceInput(sentence);
-  if (!safeInput) return null;
+/** 免配置在线神经网络翻译通道 B：Google GTX NMT */
+async function translateViaGtx(safeInput: string, signal: AbortSignal): Promise<string> {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q=${encodeURIComponent(safeInput)}`;
+  const resp = await fetch(url, { signal });
+  if (!resp.ok) throw new Error('GTX HTTP error');
+  const data = (await resp.json()) as unknown;
+  if (!Array.isArray(data) || !Array.isArray(data[0])) {
+    throw new Error('Unexpected GTX payload');
+  }
+  const joined = (data[0] as unknown[])
+    .map((seg) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
+    .join('');
+  const valid = validateChineseOutput(joined);
+  if (!valid) throw new Error('Invalid GTX output');
+  return valid;
+}
 
-  const apiKey = getParentApiKey();
-  if (!apiKey) return null;
-
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 8000);
-
+/** DeepSeek 大模型语境翻译（配置了本机 API Key 时优先使用） */
+async function translateViaDeepSeek(
+  safeInput: string,
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<string | null> {
   try {
     const response = await fetch(DEEPSEEK_ENDPOINT, {
       method: 'POST',
@@ -208,7 +229,7 @@ export async function translateSentenceWithAi(sentence: string): Promise<string 
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      signal: controller.signal,
+      signal,
       body: JSON.stringify({
         model: 'deepseek-chat',
         temperature: 0.1,
@@ -232,11 +253,44 @@ export async function translateSentenceWithAi(sentence: string): Promise<string 
       choices?: { message?: { content?: string } }[];
     };
     const rawContent = payload.choices?.[0]?.message?.content ?? '';
-    const valid = validateChineseOutput(rawContent);
-    if (valid) {
-      writeCacheEntry(sentence, valid);
+    return validateChineseOutput(rawContent);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 第二步：整句在线神经网络翻译（优先使用 DeepSeek Key，未配置 Key 时自动走免配置双路神经网络翻译竞速）
+ */
+export async function translateSentenceWithAi(sentence: string): Promise<string | null> {
+  const cached = getCachedTranslation(sentence);
+  if (cached) return cached;
+
+  const safeInput = sanitizeSentenceInput(sentence);
+  if (!safeInput) return null;
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 6500);
+
+  try {
+    const apiKey = getParentApiKey();
+    if (apiKey) {
+      const fromAi = await translateViaDeepSeek(safeInput, apiKey, controller.signal);
+      if (fromAi) {
+        writeCacheEntry(sentence, fromAi);
+        return fromAi;
+      }
     }
-    return valid;
+
+    const fromFreeNmt = await Promise.any([
+      translateViaMyMemory(safeInput, controller.signal),
+      translateViaGtx(safeInput, controller.signal),
+    ]);
+    if (fromFreeNmt) {
+      writeCacheEntry(sentence, fromFreeNmt);
+      return fromFreeNmt;
+    }
+    return null;
   } catch {
     return null;
   } finally {
@@ -245,12 +299,10 @@ export async function translateSentenceWithAi(sentence: string): Promise<string 
 }
 
 /**
- * 整页批量预翻译：拍完一页后，若已配 API Key，一次请求把本页未缓存的可信句子全部译好写入缓存。
- * 孩子随后点任何词或句子都是 0 毫秒秒出。
+ * 整页批量预翻译：拍完一页后，把本页未命中本地语法的句子提前译好写入缓存。
  */
 export async function pretranslatePageSentences(sentences: readonly string[]): Promise<void> {
-  const apiKey = getParentApiKey();
-  if (!apiKey || sentences.length === 0) return;
+  if (sentences.length === 0) return;
 
   const dict = await loadZhDict();
   const lookupMeaning = createWordLookup(dict);
@@ -268,10 +320,17 @@ export async function pretranslatePageSentences(sentences: readonly string[]): P
 
     const safe = sanitizeSentenceInput(raw);
     if (safe) pending.push(safe);
-    if (pending.length >= 12) break;
+    if (pending.length >= 10) break;
   }
 
   if (pending.length === 0) return;
+
+  const apiKey = getParentApiKey();
+  if (!apiKey) {
+    // 未配 Key 时并发预热前 5 条免配置神经翻译
+    await Promise.allSettled(pending.slice(0, 5).map((item) => translateSentenceWithAi(item)));
+    return;
+  }
 
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 12000);

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { OcrSentence, OcrWord } from '@kea/shared-types';
 import {
-  hasParentApiKey,
   resolveSentenceLocal,
   translateSentenceWithAi,
   type SentenceTranslationResult,
@@ -89,7 +88,7 @@ export function SentenceCard({
         setTakeUrl(objectUrl);
       }
 
-      if (!localRes.translation && hasParentApiKey()) {
+      if (!localRes.translation) {
         setAiLoading(true);
         const aiText = await translateSentenceWithAi(sentence.text);
         if (cancelled) return;
