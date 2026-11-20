@@ -69,7 +69,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     stopSpeaking();
     setSource({ url, fromObjectUrl });
     setStatus('running');
-    setScanLabel('正在认字…');
+    setScanLabel('正在读取照片…');
     setError(null);
     setResult(null);
     setSelected(null);
@@ -80,9 +80,11 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       const [image, lexicon] = await Promise.all([loadImage(url), loadLexicon()]);
       if (id !== runId.current) return;
 
+      setScanLabel('正在优化清晰度…');
       const pre = await preprocess(image, { maxEdge: OCR_MAX_EDGE, grayscale: true });
       if (id !== runId.current) return;
 
+      setScanLabel('正在启动认字引擎…');
       const engine = (engineRef.current ??= new TesseractEngine());
       const run = await engine.run(
         { canvas: pre.canvas, imageBytes: pre.imageBytes },
@@ -91,8 +93,14 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
           if (progress.status === 'recognizing text') {
             const pct = Math.round(progress.progress * 100);
             setScanLabel(pct > 0 ? `正在认字 ${pct}%…` : '正在认字…');
+          } else if (progress.status === 'loading tesseract core') {
+            setScanLabel('首次加载离线识别内核…');
+          } else if (progress.status === 'loading language traineddata') {
+            setScanLabel('首次下载英文词模…');
+          } else if (progress.status === 'initializing api') {
+            setScanLabel('正在准备英文词典…');
           } else {
-            setScanLabel('正在准备认字引擎…');
+            setScanLabel('正在启动认字引擎…');
           }
         },
       );
@@ -130,9 +138,16 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
           return prev;
         });
       });
-    } catch {
+    } catch (err) {
       if (id !== runId.current) return;
-      setError('这一页看不清，再拍一次吧。');
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('超时')) {
+        setError('识别模型加载或扫描超时，请检查网络或点“再拍一页”重试。');
+        void engineRef.current?.dispose();
+        engineRef.current = null;
+      } else {
+        setError('这一页看不清，再拍一次吧。');
+      }
       setStatus('error');
     }
   }, []);

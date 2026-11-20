@@ -12,9 +12,19 @@ let cache: Promise<Set<string> | null> | null = null;
 
 export function loadLexicon(): Promise<Set<string> | null> {
   cache ??= (async () => {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer =
+      controller && typeof setTimeout === 'function'
+        ? setTimeout(() => controller.abort(), 8000)
+        : undefined;
     try {
-      const response = await fetch(`${import.meta.env.BASE_URL}lexicon/en-words.txt.gz`);
-      if (!response.ok) return null;
+      const response = await fetch(`${import.meta.env.BASE_URL}lexicon/en-words.txt.gz`, {
+        signal: controller?.signal,
+      });
+      if (!response.ok) {
+        cache = null;
+        return null;
+      }
 
       const bytes = new Uint8Array(await response.arrayBuffer());
       // 开发服务器会原样给出 gzip；预览和部分静态托管会按 .gz 加上 Content-Encoding，
@@ -27,7 +37,10 @@ export function loadLexicon(): Promise<Set<string> | null> {
         : new TextDecoder().decode(bytes);
       return new Set(text.split('\n'));
     } catch {
+      cache = null;
       return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   })();
 

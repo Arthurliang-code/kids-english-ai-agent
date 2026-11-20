@@ -11,8 +11,10 @@ const CAPTURE_MAX_EDGE = 2048;
 
 export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraSheetProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [capturing, setCapturing] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -21,6 +23,7 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
     let stream: MediaStream | null = null;
     setError(null);
     setLive(false);
+    setCapturing(false);
 
     void navigator.mediaDevices
       .getUserMedia({
@@ -37,6 +40,7 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
           return;
         }
         stream = mediaStream;
+        streamRef.current = mediaStream;
         const video = videoRef.current;
         if (!video) return;
         video.srcObject = mediaStream;
@@ -51,40 +55,71 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
     return () => {
       cancelled = true;
       stream?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
       setLive(false);
+      setCapturing(false);
     };
   }, [open]);
 
   if (!open) return null;
 
   const handleCapture = () => {
+    if (capturing) return;
     const video = videoRef.current;
     if (!video || video.videoWidth === 0) return;
 
+    setCapturing(true);
     const scale = Math.min(1, CAPTURE_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight));
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(video.videoWidth * scale);
     canvas.height = Math.round(video.videoHeight * scale);
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    if (typeof canvas.toBlob === 'function') {
-      canvas.toBlob(
-        (blob) => {
-          if (blob) {
-            onCapture(URL.createObjectURL(blob), true);
-          } else {
-            onCapture(canvas.toDataURL('image/jpeg', 0.88), false);
-          }
-        },
-        'image/jpeg',
-        0.88,
-      );
+    if (!ctx) {
+      setCapturing(false);
       return;
     }
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    onCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+    // 拍下瞬间先停掉实时摄像头流，释放 iPad 内存与 GPU 给后续识别
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+
+    let settled = false;
+    const finishCapture = (url: string, fromObjectUrl: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(fallbackTimer);
+      onCapture(url, fromObjectUrl);
+    };
+
+    const fallbackTimer = window.setTimeout(() => {
+      try {
+        finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+      } catch {
+        setCapturing(false);
+      }
+    }, 1200);
+
+    if (typeof canvas.toBlob === 'function') {
+      try {
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              finishCapture(URL.createObjectURL(blob), true);
+            } else {
+              finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+            }
+          },
+          'image/jpeg',
+          0.88,
+        );
+        return;
+      } catch {
+        // 回退到同步导出
+      }
+    }
+
+    finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
   };
 
   return (
@@ -133,8 +168,13 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
         </div>
 
         <div className="sheet-foot">
-          <button className="primary big" type="button" onClick={handleCapture} disabled={!live}>
-            📷 拍下这一页
+          <button
+            className="primary big"
+            type="button"
+            onClick={handleCapture}
+            disabled={!live || capturing}
+          >
+            {capturing ? '正在处理照片…' : '📷 拍下这一页'}
           </button>
         </div>
       </div>

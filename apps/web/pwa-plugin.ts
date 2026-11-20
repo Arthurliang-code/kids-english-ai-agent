@@ -55,7 +55,7 @@ export function pwaPlugin(distDir: string): Plugin {
       );
       const indexUrl = `${base}index.html`;
       const appCache = `kea-app-${fnv(shellUrls.join('\n'))}`;
-      const staticCache = 'kea-static-v3';
+      const staticCache = 'kea-static-v4';
       const source = `const APP_CACHE=${JSON.stringify(appCache)};
 const STATIC_CACHE=${JSON.stringify(staticCache)};
 const SHELL_ASSETS=${JSON.stringify(shellUrls)};
@@ -67,6 +67,11 @@ self.addEventListener('install', (event) => {
     await cache.addAll(SHELL_ASSETS);
     await self.skipWaiting();
   })());
+});
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'skip-waiting') {
+    void self.skipWaiting();
+  }
 });
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
@@ -90,7 +95,7 @@ self.addEventListener('fetch', (event) => {
       const cache = await caches.open(APP_CACHE);
       try {
         const fresh = await fetch(event.request, { cache: 'no-store' });
-        cache.put(INDEX, fresh.clone());
+        event.waitUntil(cache.put(INDEX, fresh.clone()).catch(() => undefined));
         return fresh;
       } catch (error) {
         return (await cache.match(event.request, { ignoreSearch: true })) || (await cache.match(INDEX)) || Promise.reject(error);
@@ -100,7 +105,10 @@ self.addEventListener('fetch', (event) => {
     const cached = await cache.match(event.request, { ignoreSearch: true });
     if (cached) return cached;
     const response = await fetch(event.request);
-    if (response.ok) cache.put(event.request, response.clone());
+    if (response.ok && response.status === 200) {
+      const copy = response.clone();
+      event.waitUntil(cache.put(event.request, copy).catch(() => undefined));
+    }
     return response;
   })());
 });

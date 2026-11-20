@@ -17,17 +17,28 @@ export interface PreprocessOutput {
 export function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(loadTimer);
+      fn();
+    };
+    const loadTimer = setTimeout(() => {
+      finish(() => reject(new Error('图片加载超时')));
+    }, 10_000);
+
     img.onload = () => {
       if (typeof img.decode === 'function') {
-        void img
-          .decode()
-          .catch(() => undefined)
-          .then(() => resolve(img));
+        const decodeTimeout = new Promise<void>((res) => setTimeout(res, 1000));
+        void Promise.race([img.decode().catch(() => undefined), decodeTimeout]).then(() => {
+          finish(() => resolve(img));
+        });
       } else {
-        resolve(img);
+        finish(() => resolve(img));
       }
     };
-    img.onerror = () => reject(new Error('图片加载失败'));
+    img.onerror = () => finish(() => reject(new Error('图片加载失败')));
     img.src = url;
   });
 }

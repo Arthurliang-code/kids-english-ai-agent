@@ -21,8 +21,8 @@ import { normalizeEnglishToken, recoverPronounI } from '../../../domain/text';
  *    Worker 内 IndexedDB 锁死或读出旧版不兼容缓存。
  */
 const ASSET_BASE = `${import.meta.env.BASE_URL}tesseract`;
-const WORKER_INIT_TIMEOUT_MS = 20_000;
-const RECOGNIZE_TIMEOUT_MS = 30_000;
+const WORKER_INIT_TIMEOUT_MS = 45_000;
+const RECOGNIZE_TIMEOUT_MS = 25_000;
 
 /** wasm-feature-detect 标准探测字节码 */
 const RELAXED_SIMD_WASM = new Uint8Array([
@@ -93,6 +93,7 @@ export class TesseractEngine implements OcrEngine {
   private worker: TesseractWorker | null = null;
   private initPromise: Promise<void> | null = null;
   private progressListener: ((p: OcrEngineProgress) => void) | null = null;
+  private disposed = false;
 
   warm(): Promise<void> {
     return this.ensureWorker().catch(() => undefined);
@@ -206,6 +207,7 @@ export class TesseractEngine implements OcrEngine {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
     this.progressListener = null;
     await this.worker?.terminate();
     this.worker = null;
@@ -213,6 +215,9 @@ export class TesseractEngine implements OcrEngine {
   }
 
   private createWorkerForCore(coreFile: string): Promise<TesseractWorker> {
+    let timedOut = false;
+    this.progressListener?.({ status: 'loading tesseract core', progress: 0 });
+
     const createPromise = new Promise<TesseractWorker>((resolve, reject) => {
       void Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
         workerPath: `${ASSET_BASE}/worker.min.js`,
@@ -222,6 +227,7 @@ export class TesseractEngine implements OcrEngine {
         cacheMethod: 'none',
         gzip: true,
         logger: (message) => {
+          if (timedOut || this.disposed) return;
           this.progressListener?.({
             status: message.status,
             progress: Math.max(0, Math.min(1, message.progress)),
@@ -230,13 +236,40 @@ export class TesseractEngine implements OcrEngine {
         errorHandler: (err) => {
           reject(err instanceof Error ? err : new Error(String(err)));
         },
-      }).then(resolve, reject);
+      }).then(
+        (worker) => {
+          if (timedOut || this.disposed) {
+            void worker.terminate();
+            reject(new Error('OCR 引擎初始化已取消'));
+            return;
+          }
+          resolve(worker);
+        },
+        reject,
+      );
     });
 
-    return withTimeout(createPromise, WORKER_INIT_TIMEOUT_MS, 'OCR 引擎初始化超时');
+    return new Promise<TesseractWorker>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error('OCR 引擎下载或初始化超时'));
+      }, WORKER_INIT_TIMEOUT_MS);
+
+      createPromise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   private ensureWorker(): Promise<void> {
+    if (this.disposed) this.disposed = false;
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
@@ -244,8 +277,13 @@ export class TesseractEngine implements OcrEngine {
       let lastError: unknown = null;
 
       for (const coreFile of candidates) {
+        if (this.disposed) throw new Error('OCR 引擎已释放');
         try {
           const worker = await this.createWorkerForCore(coreFile);
+          if (this.disposed) {
+            void worker.terminate();
+            throw new Error('OCR 引擎已释放');
+          }
           await worker.setParameters({
             // 试卷/绘本照片是稀疏排版，稀疏模式明显优于默认自动分页
             tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT,
