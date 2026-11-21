@@ -20,7 +20,12 @@ import {
   selectCoreCandidates,
 } from './ocr-startup.ts';
 
-function createStrictWebKitSwHarness(options?: { failCacheOpen?: boolean; redirected?: boolean }) {
+function createStrictWebKitSwHarness(options?: {
+  failCacheOpen?: boolean;
+  redirected?: boolean;
+  pageTimeoutMs?: number;
+  hangNavigationFetch?: boolean;
+}) {
   const source = generateServiceWorkerSource({
     appCache: 'kea-app-test',
     staticCache: 'kea-static-v4',
@@ -32,11 +37,13 @@ function createStrictWebKitSwHarness(options?: { failCacheOpen?: boolean; redire
       '/kids-english-ai-agent/icons/',
     ],
     indexUrl: '/kids-english-ai-agent/index.html',
+    pageTimeoutMs: options?.pageTimeoutMs,
   });
 
   const listeners = new Map<string, (event: unknown) => void>();
   const cacheStores = new Map<string, Map<string, { url: string; body: string; status: number }>>();
   let fetchCount = 0;
+  let skipWaitingCount = 0;
 
   const getStore = (name: string) => {
     let store = cacheStores.get(name);
@@ -50,12 +57,16 @@ function createStrictWebKitSwHarness(options?: { failCacheOpen?: boolean; redire
   const sandbox = {
     URL,
     Promise,
+    setTimeout,
+    clearTimeout,
     self: {
       location: { origin: 'https://example.github.io' },
       addEventListener(type: string, fn: (event: unknown) => void) {
         listeners.set(type, fn);
       },
-      skipWaiting: async () => undefined,
+      skipWaiting: async () => {
+        skipWaitingCount += 1;
+      },
       clients: { claim: async () => undefined },
     },
     caches: {
@@ -65,12 +76,15 @@ function createStrictWebKitSwHarness(options?: { failCacheOpen?: boolean; redire
         }
         const store = getStore(name);
         return {
-          async addAll() {
-            return undefined;
+          async addAll(urls: string[]) {
+            for (const u of urls) {
+              store.set(u, { url: u, body: `cached:${u}`, status: 200 });
+            }
           },
           async match(req: { url: string } | string) {
-            const key = typeof req === 'string' ? req : req.url;
-            return store.get(key);
+            const rawKey = typeof req === 'string' ? req : req.url;
+            const pathname = rawKey.startsWith('http') ? new URL(rawKey).pathname : rawKey;
+            return store.get(rawKey) ?? store.get(pathname);
           },
           async put(req: { url: string } | string, resp: { url: string; body: string; status: number }) {
             const key = typeof req === 'string' ? req : req.url;
@@ -85,8 +99,13 @@ function createStrictWebKitSwHarness(options?: { failCacheOpen?: boolean; redire
         return cacheStores.delete(key);
       },
     },
-    async fetch(req: { url: string }) {
+    async fetch(req: { url: string; mode?: string }) {
       fetchCount += 1;
+      if (options?.hangNavigationFetch && req.mode === 'navigate') {
+        return new Promise(() => {
+          // 模拟弱网假死挂起
+        });
+      }
       await Promise.resolve();
       const body = `ok:${req.url}`;
       const makeResp = () => ({
@@ -141,7 +160,12 @@ function createStrictWebKitSwHarness(options?: { failCacheOpen?: boolean; redire
     return { response: response as { status: number; body: string }, fetchCount };
   };
 
-  return { dispatchFetch, cacheStores };
+  return {
+    dispatchFetch,
+    cacheStores,
+    listeners,
+    getSkipWaitingCount: () => skipWaitingCount,
+  };
 }
 
 void test('SW 在严格 WebKit FetchEvent 生命周期下能正常加载并缓存 OCR 静态资源（不触发异步 waitUntil InvalidStateError）', async () => {
@@ -611,4 +635,40 @@ void test('createCameraPreviewController 在 attachAndWaitForVideo 等待出帧�
 
   controller.dispose();
   assert.equal(s2.getStopCount(), 1);
+});
+
+void test('SW install 不会自动 skipWaiting 抢占活跃会话，且已缓存壳在导航请求假死时按超时回退缓存', async () => {
+  const harness = createStrictWebKitSwHarness({
+    pageTimeoutMs: 25,
+    hangNavigationFetch: true,
+  });
+
+  const installHandler = harness.listeners.get('install');
+  assert.ok(installHandler, 'install listener must be registered');
+  const installTasks: Promise<unknown>[] = [];
+  installHandler({
+    waitUntil(p: Promise<unknown>) {
+      installTasks.push(Promise.resolve(p));
+    },
+  });
+  await Promise.all(installTasks);
+  assert.equal(
+    harness.getSkipWaitingCount(),
+    0,
+    'install 阶段不应自动 skipWaiting，避免系统相机返回时触发整页强刷',
+  );
+
+  // 收到用户确认更新消息后才执行 skipWaiting
+  const messageHandler = harness.listeners.get('message');
+  assert.ok(messageHandler, 'message listener must be registered');
+  messageHandler({ data: { type: 'skip-waiting' } });
+  assert.equal(harness.getSkipWaitingCount(), 1);
+
+  // 导航请求网络挂起时，应在 pageTimeoutMs 后回退到 install 预缓存的 INDEX
+  const navRes = await harness.dispatchFetch(
+    'https://example.github.io/kids-english-ai-agent/',
+    'navigate',
+  );
+  assert.equal(navRes.response.status, 200);
+  assert.equal(navRes.response.body, 'cached:/kids-english-ai-agent/');
 });

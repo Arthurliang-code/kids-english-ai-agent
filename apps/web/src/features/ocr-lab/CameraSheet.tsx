@@ -242,10 +242,18 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
               <p>{error}</p>
               {onPickFile ? (
                 <div className="video-hint-actions">
-                  <label className="kid-album" htmlFor={systemCameraInputId}>
+                  <label
+                    className="kid-album"
+                    htmlFor={systemCameraInputId}
+                    onClick={() => controllerRef.current?.pause()}
+                  >
                     📷 用系统相机拍
                   </label>
-                  <label className="kid-album" htmlFor={albumInputId}>
+                  <label
+                    className="kid-album"
+                    htmlFor={albumInputId}
+                    onClick={() => controllerRef.current?.pause()}
+                  >
                     🖼️ 从相册选一张
                   </label>
                 </div>
@@ -261,8 +269,6 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
               type="file"
               accept="image/*"
               capture="environment"
-              tabIndex={error ? undefined : -1}
-              aria-hidden={error ? undefined : true}
               style={HIDDEN_FILE_INPUT_STYLE}
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -274,8 +280,6 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
               id={albumInputId}
               type="file"
               accept="image/*"
-              tabIndex={error ? undefined : -1}
-              aria-hidden={error ? undefined : true}
               style={HIDDEN_FILE_INPUT_STYLE}
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -295,6 +299,24 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
           >
             {capturing ? '正在处理照片…' : '📷 拍下这一页'}
           </button>
+          {onPickFile ? (
+            <div className="sheet-foot-alt">
+              <label
+                className="sheet-alt-btn"
+                htmlFor={systemCameraInputId}
+                onClick={() => controllerRef.current?.pause()}
+              >
+                📷 用系统相机拍
+              </label>
+              <label
+                className="sheet-alt-btn"
+                htmlFor={albumInputId}
+                onClick={() => controllerRef.current?.pause()}
+              >
+                🖼️ 从相册选一张
+              </label>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

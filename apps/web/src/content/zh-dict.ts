@@ -32,12 +32,25 @@ function parseDict(text: string): ZhDict {
 
 export function loadZhDict(): Promise<ZhDict | null> {
   cache ??= (async () => {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer =
+      controller && typeof setTimeout === 'function'
+        ? setTimeout(() => controller.abort(), 8000)
+        : undefined;
     try {
-      const response = await fetch(`${import.meta.env.BASE_URL}lexicon/zh-senses.json.gz`);
-      if (!response.ok) return null;
+      const response = await fetch(`${import.meta.env.BASE_URL}lexicon/zh-senses.json.gz`, {
+        signal: controller?.signal,
+      });
+      if (!response.ok) {
+        cache = null;
+        return null;
+      }
       return parseDict(await decodePayload(await response.arrayBuffer()));
     } catch {
+      cache = null;
       return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   })();
   return cache;

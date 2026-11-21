@@ -36,6 +36,7 @@ export interface ServiceWorkerTemplateOptions {
   shellUrls: string[];
   staticPrefixes: string[];
   indexUrl: string;
+  pageTimeoutMs?: number;
 }
 
 /**
@@ -43,6 +44,9 @@ export interface ServiceWorkerTemplateOptions {
  * 重要兼容约束（iPad Safari / WebKit）：
  * - `event.waitUntil(...)` 必须在 `fetch` 监听器的同步执行阶段注册，不能在 `event.respondWith(async () => ...)`
  *   里经过 `await` 后再异步调用，否则 WebKit 可能抛出 `InvalidStateError`，导致未缓存的 OCR 模型/Worker 请求全部失败；
+ * - `install` 阶段不自动调用 `self.skipWaiting()`，仅在用户点击更新横幅发送 `{ type: 'skip-waiting' }` 时跳过等待，
+ *   防止从系统相机/后台返回时自动激活并触发整页刷新导致照片丢失；
+ * - 已有本地缓存壳（INDEX）时，页面导航请求带超时回退，防止弱网连 `github.io` 假死时长时间白屏；
  * - 所有 CacheStorage 读写都做容错，任何缓存异常都透明回退到网络 `fetch`，不阻断首屏与识别资源加载。
  */
 export function generateServiceWorkerSource({
@@ -51,17 +55,41 @@ export function generateServiceWorkerSource({
   shellUrls,
   staticPrefixes,
   indexUrl,
+  pageTimeoutMs = 3500,
 }: ServiceWorkerTemplateOptions): string {
   return `const APP_CACHE=${JSON.stringify(appCache)};
 const STATIC_CACHE=${JSON.stringify(staticCache)};
 const SHELL_ASSETS=${JSON.stringify(shellUrls)};
 const STATIC_PREFIXES=${JSON.stringify(staticPrefixes)};
 const INDEX=${JSON.stringify(indexUrl)};
+const PAGE_TIMEOUT_MS=${JSON.stringify(pageTimeoutMs)};
+function fetchPageWithTimeout(request, timeoutMs) {
+  if (typeof setTimeout !== 'function' || !(timeoutMs > 0)) {
+    return fetch(request, { cache: 'no-store' });
+  }
+  if (typeof AbortController === 'function') {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(request, { cache: 'no-store', signal: controller.signal }).finally(() => clearTimeout(timer));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('PAGE_FETCH_TIMEOUT')), timeoutMs);
+    fetch(request, { cache: 'no-store' }).then(
+      (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(APP_CACHE);
     await cache.addAll(SHELL_ASSETS);
-    await self.skipWaiting();
   })());
 });
 self.addEventListener('message', (event) => {
@@ -98,13 +126,21 @@ self.addEventListener('fetch', (event) => {
     try {
       if (isPage) {
         let cache = null;
+        let cachedFallback = null;
         try {
           cache = await caches.open(APP_CACHE);
+          cachedFallback =
+            (await cache.match(event.request, { ignoreSearch: true }).catch(() => undefined)) ||
+            (await cache.match(INDEX).catch(() => undefined)) ||
+            null;
         } catch {
           cache = null;
+          cachedFallback = null;
         }
         try {
-          const fresh = await fetch(event.request, { cache: 'no-store' });
+          const fresh = cachedFallback
+            ? await fetchPageWithTimeout(event.request, PAGE_TIMEOUT_MS)
+            : await fetch(event.request, { cache: 'no-store' });
           if (cache && fresh.ok && fresh.status === 200 && !fresh.redirected) {
             try {
               const copy = fresh.clone();
@@ -115,12 +151,7 @@ self.addEventListener('fetch', (event) => {
           }
           return fresh;
         } catch (error) {
-          if (cache) {
-            const fallback =
-              (await cache.match(event.request, { ignoreSearch: true }).catch(() => undefined)) ||
-              (await cache.match(INDEX).catch(() => undefined));
-            if (fallback) return fallback;
-          }
+          if (cachedFallback) return cachedFallback;
           throw error;
         }
       }

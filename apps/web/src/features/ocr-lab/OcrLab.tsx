@@ -59,16 +59,25 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     };
   }, []);
 
+  const sourceUrl = source?.url ?? null;
+  const sourceFromObjectUrl = source?.fromObjectUrl ?? false;
+
   useEffect(() => {
     return () => {
-      if (source?.fromObjectUrl) URL.revokeObjectURL(source.url);
+      if (sourceFromObjectUrl && sourceUrl) {
+        URL.revokeObjectURL(sourceUrl);
+      }
     };
-  }, [source]);
+  }, [sourceUrl, sourceFromObjectUrl]);
 
   const applyImage = useCallback(async (url: string, fromObjectUrl: boolean) => {
     const id = ++runId.current;
     stopSpeaking();
-    setSource({ url, fromObjectUrl });
+    setSource((prev) =>
+      prev && prev.url === url && prev.fromObjectUrl === fromObjectUrl
+        ? prev
+        : { url, fromObjectUrl },
+    );
     setStatus('running');
     setScanLabel('正在读取照片…');
     setError(null);

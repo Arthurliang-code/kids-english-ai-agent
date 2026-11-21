@@ -586,6 +586,30 @@ button.big {
 
 .sheet-foot {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sheet-foot-alt {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.sheet-alt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sun-ink);
+  background: rgba(255, 254, 248, 0.88);
+  border: 1px solid rgba(180, 130, 20, 0.25);
+  border-radius: 999px;
+  padding: 8px 16px;
+  min-height: 40px;
 }
 
 /* ---------- 顶栏与更新横幅 ---------- */

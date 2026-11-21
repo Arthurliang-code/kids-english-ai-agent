@@ -26,9 +26,9 @@ import {
  *    Worker 内 IndexedDB 锁死或读出旧版不兼容缓存。
  */
 const ASSET_BASE = `${import.meta.env.BASE_URL}tesseract`;
-const WORKER_SIMD_TIMEOUT_MS = 25_000;
-const WORKER_FALLBACK_TIMEOUT_MS = 40_000;
-const RECOGNIZE_TIMEOUT_MS = 25_000;
+const WORKER_SIMD_TIMEOUT_MS = 45_000;
+const WORKER_FALLBACK_TIMEOUT_MS = 45_000;
+const RECOGNIZE_TIMEOUT_MS = 30_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -290,6 +290,10 @@ export class TesseractEngine implements OcrEngine {
           return;
         } catch (error) {
           lastError = error;
+          // 若当前候选是因网络下载超时失败，不再立即并发启动第二个 3.9MB 核心下载抢带宽，直接交由用户重试
+          if (error instanceof Error && error.message.includes('超时')) {
+            break;
+          }
         }
       }
 
