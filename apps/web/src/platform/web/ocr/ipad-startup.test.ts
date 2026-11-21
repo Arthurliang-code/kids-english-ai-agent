@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { gzipSync } from 'node:zlib';
 import { generateServiceWorkerSource } from '../../../../pwa-plugin.ts';
 import {
   attachAndWaitForVideo,
@@ -15,6 +17,7 @@ import {
   checkOcrRuntimeSupport,
   classifyRecognitionError,
   dataUrlToUint8Array,
+  gunzipBytes,
   isAppleTouchDevice,
   normalizeWorkerError,
   selectCoreCandidates,
@@ -637,7 +640,7 @@ void test('createCameraPreviewController 在 attachAndWaitForVideo 等待出帧�
   assert.equal(s2.getStopCount(), 1);
 });
 
-void test('SW install 不会自动 skipWaiting 抢占活跃会话，且已缓存壳在导航请求假死时按超时回退缓存', async () => {
+void test('SW install 容错激活以替换旧版 SW，?v= 版本参数绕过旧静态缓存，且导航请求假死时按超时回退缓存', async () => {
   const harness = createStrictWebKitSwHarness({
     pageTimeoutMs: 25,
     hangNavigationFetch: true,
@@ -652,17 +655,15 @@ void test('SW install 不会自动 skipWaiting 抢占活跃会话，且已缓存
     },
   });
   await Promise.all(installTasks);
-  assert.equal(
-    harness.getSkipWaitingCount(),
-    0,
-    'install 阶段不应自动 skipWaiting，避免系统相机返回时触发整页强刷',
-  );
+  assert.equal(harness.getSkipWaitingCount(), 1, 'install 应立即 skipWaiting 以替换 iPad 上的旧版 SW');
 
-  // 收到用户确认更新消息后才执行 skipWaiting
-  const messageHandler = harness.listeners.get('message');
-  assert.ok(messageHandler, 'message listener must be registered');
-  messageHandler({ data: { type: 'skip-waiting' } });
-  assert.equal(harness.getSkipWaitingCount(), 1);
+  // ?v=2 版本化 worker.min.js 请求不应误命中旧的无参数 worker.min.js 缓存
+  const oldWorkerUrl = 'https://example.github.io/kids-english-ai-agent/tesseract/worker.min.js';
+  const newWorkerUrl = 'https://example.github.io/kids-english-ai-agent/tesseract/worker.min.js?v=2';
+  const r1 = await harness.dispatchFetch(oldWorkerUrl);
+  assert.equal(r1.fetchCount, 1);
+  const r2 = await harness.dispatchFetch(newWorkerUrl);
+  assert.equal(r2.fetchCount, 2, '带 ?v=2 的请求应拉取新版 worker.min.js');
 
   // 导航请求网络挂起时，应在 pageTimeoutMs 后回退到 install 预缓存的 INDEX
   const navRes = await harness.dispatchFetch(
@@ -671,4 +672,23 @@ void test('SW install 不会自动 skipWaiting 抢占活跃会话，且已缓存
   );
   assert.equal(navRes.response.status, 200);
   assert.equal(navRes.response.body, 'cached:/kids-english-ai-agent/');
+});
+
+void test('gunzipBytes 正确解压 Gzip 数据且 worker.min.js 已包含 TesseractCore 初始化异常 reject 回调', async () => {
+  const plain = new TextEncoder().encode('hello kids english');
+  const compressed = new Uint8Array(gzipSync(plain));
+  const decompressed = await gunzipBytes(compressed, 2000);
+  assert.equal(new TextDecoder().decode(decompressed), 'hello kids english');
+
+  const passthrough = await gunzipBytes(plain, 2000);
+  assert.equal(new TextDecoder().decode(passthrough), 'hello kids english');
+
+  const workerCode = readFileSync(
+    new URL('../../../../public/tesseract/worker.min.js', import.meta.url),
+    'utf8',
+  );
+  assert.ok(
+    workerCode.includes('Failed to initialize TesseractCore'),
+    'public/tesseract/worker.min.js 必须捕获 TesseractCore 初始化异常并调用 r.reject',
+  );
 });

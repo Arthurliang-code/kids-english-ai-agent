@@ -22,10 +22,28 @@
     <p>正在换成新版本…</p>
     <script>
       (async () => {
+        const fullReset = window.location.search.includes('full=1');
         const registrations = (await navigator.serviceWorker?.getRegistrations?.()) ?? [];
         await Promise.all(registrations.map((registration) => registration.unregister()));
         const keys = (await caches?.keys?.()) ?? [];
-        await Promise.all(keys.map((key) => caches.delete(key)));
+        await Promise.all(
+          keys
+            .filter((key) => fullReset || key !== 'kea-static-v4')
+            .map((key) => caches.delete(key)),
+        );
+        if (!fullReset && typeof caches !== 'undefined') {
+          try {
+            const staticCache = await caches.open('kea-static-v4');
+            const requests = await staticCache.keys();
+            await Promise.all(
+              requests
+                .filter((req) => req.url.includes('worker.min.js'))
+                .map((req) => staticCache.delete(req)),
+            );
+          } catch {
+            // 忽略静态缓存清理异常
+          }
+        }
         window.location.replace(new URL('.', window.location.href).href);
       })();
     </script>

@@ -1,15 +1,13 @@
 import { lemmaCandidates } from '../domain/lexicon';
 import { lookupZhSense, type ZhDict, type ZhSense } from '../domain/sense';
 import type { GlossaryEntry } from '../domain/glossary';
+import { gunzipBytes } from '../platform/web/ocr/ocr-startup';
 
 let cache: Promise<ZhDict | null> | null = null;
 
 async function decodePayload(buffer: ArrayBuffer): Promise<string> {
-  const bytes = new Uint8Array(buffer);
-  const gzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-  return gzip
-    ? await new Response(new Blob([buffer]).stream().pipeThrough(new DecompressionStream('gzip'))).text()
-    : new TextDecoder().decode(bytes);
+  const bytes = await gunzipBytes(new Uint8Array(buffer), 6000);
+  return new TextDecoder().decode(bytes);
 }
 
 function parseDict(text: string): ZhDict {

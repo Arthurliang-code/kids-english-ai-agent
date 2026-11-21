@@ -5,9 +5,87 @@ import type { OcrEngine, OcrEngineProgress, OcrInput, OcrEngineRun } from '../..
 import { normalizeEnglishToken, recoverPronounI } from '../../../domain/text';
 import {
   checkOcrRuntimeSupport,
+  dataUrlToUint8Array,
+  gunzipBytes,
   normalizeWorkerError,
   selectCoreCandidates,
 } from './ocr-startup';
+
+interface DirectTessBaseApi {
+  Init: (dataPath: string | null, lang: string, oem: number) => number;
+  SetVariable: (key: string, value: string) => void;
+  SetImageFile: (exif: number, angle: number) => number;
+  Recognize: (monitor: null) => number;
+  GetUTF8Text: () => string;
+  GetJSONText: () => string;
+  Version: () => string;
+  End: () => void;
+}
+
+interface DirectTessModule {
+  FS: {
+    writeFile: (path: string, data: Uint8Array) => void;
+    unlink?: (path: string) => void;
+  };
+  TessBaseAPI: new () => DirectTessBaseApi;
+}
+
+type TesseractCoreFactory = (options?: {
+  TesseractProgress?: (percent: number) => void;
+}) => Promise<DirectTessModule>;
+
+interface DirectCoreSession {
+  tessModule: DirectTessModule;
+  api: DirectTessBaseApi;
+}
+
+type RawRecognizeData = Awaited<ReturnType<TesseractWorker['recognize']>>['data'];
+
+function loadCoreScriptOnMainThread(coreUrl: string, timeoutMs: number): Promise<TesseractCoreFactory> {
+  const g = globalThis as { TesseractCore?: TesseractCoreFactory };
+  if (typeof g.TesseractCore === 'function') {
+    return Promise.resolve(g.TesseractCore);
+  }
+  if (typeof document === 'undefined') {
+    return Promise.reject(new Error('当前环境不支持主线程脚本加载'));
+  }
+
+  return new Promise<TesseractCoreFactory>((resolve, reject) => {
+    let settled = false;
+    const script = document.createElement('script');
+    script.src = coreUrl;
+    script.async = true;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      script.remove();
+      reject(new Error('OCR 内核脚本加载超时'));
+    }, timeoutMs);
+
+    script.onload = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const factory = (globalThis as { TesseractCore?: TesseractCoreFactory }).TesseractCore;
+      if (typeof factory === 'function') {
+        resolve(factory);
+      } else {
+        reject(new Error('OCR 内核脚本未导出 TesseractCore'));
+      }
+    };
+
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      script.remove();
+      reject(new Error('OCR 内核脚本加载失败'));
+    };
+
+    (document.head ?? document.documentElement).appendChild(script);
+  });
+}
 
 /**
  * 静态资源放在 public/tesseract，避免依赖 jsdelivr 等境外 CDN。
@@ -64,6 +142,8 @@ export class TesseractEngine implements OcrEngine {
   readonly label = 'Tesseract.js 7 · WASM';
 
   private worker: TesseractWorker | null = null;
+  private directSession: DirectCoreSession | null = null;
+  private pendingRawWorker: { terminate: () => void } | null = null;
   private initPromise: Promise<void> | null = null;
   private progressListener: ((p: OcrEngineProgress) => void) | null = null;
   private generation = 0;
@@ -79,7 +159,7 @@ export class TesseractEngine implements OcrEngine {
     this.progressListener = onProgress ?? null;
     try {
       let initMs = 0;
-      if (!this.worker) {
+      if (!this.worker && !this.directSession) {
         const started = performance.now();
         await this.ensureWorker();
         initMs = performance.now() - started;
@@ -88,23 +168,28 @@ export class TesseractEngine implements OcrEngine {
       }
 
       const worker = this.worker;
-      if (!worker) throw new Error('OCR 引擎初始化失败');
+      const directSession = this.directSession;
+      if (!worker && !directSession) throw new Error('OCR 引擎初始化失败');
 
       const { width, height } = input.canvas;
       const started = performance.now();
-      const imagePayload = input.imageBytes ?? input.canvas;
-      let data: Awaited<ReturnType<TesseractWorker['recognize']>>['data'];
+      let data: RawRecognizeData;
       try {
-        const response = await withTimeout(
-          worker.recognize(
-            imagePayload as unknown as HTMLCanvasElement,
-            {},
-            { text: true, blocks: true },
-          ),
-          RECOGNIZE_TIMEOUT_MS,
-          'OCR 识别超时',
-        );
-        data = response.data;
+        if (worker) {
+          const imagePayload = input.imageBytes ?? input.canvas;
+          const response = await withTimeout(
+            worker.recognize(
+              imagePayload as unknown as HTMLCanvasElement,
+              {},
+              { text: true, blocks: true },
+            ),
+            RECOGNIZE_TIMEOUT_MS,
+            'OCR 识别超时',
+          );
+          data = response.data;
+        } else {
+          data = this.recognizeWithDirectSession(directSession!, input);
+        }
       } catch (error) {
         await this.dispose();
         throw error;
@@ -182,10 +267,126 @@ export class TesseractEngine implements OcrEngine {
   async dispose(): Promise<void> {
     this.generation += 1;
     this.progressListener = null;
+    const rawWorker = this.pendingRawWorker;
+    this.pendingRawWorker = null;
+    try {
+      rawWorker?.terminate();
+    } catch {
+      // 忽略底层 Worker 终止异常
+    }
+    const direct = this.directSession;
+    this.directSession = null;
+    try {
+      direct?.api.End();
+    } catch {
+      // 忽略主线程实例释放异常
+    }
     const worker = this.worker;
     this.worker = null;
     this.initPromise = null;
     await worker?.terminate();
+  }
+
+  private recognizeWithDirectSession(
+    session: DirectCoreSession,
+    input: OcrInput,
+  ): RawRecognizeData {
+    const bytes =
+      input.imageBytes ??
+      (typeof input.canvas.toDataURL === 'function'
+        ? dataUrlToUint8Array(input.canvas.toDataURL('image/jpeg', 0.88))
+        : undefined);
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error('无法导出待识别照片数据');
+    }
+
+    this.progressListener?.({ status: 'recognizing text', progress: 0 });
+    session.tessModule.FS.writeFile('/input', bytes);
+    try {
+      const setRes = session.api.SetImageFile(1, 0);
+      if (setRes === 1) {
+        throw new Error('OCR 引擎读取照片失败');
+      }
+      session.api.Recognize(null);
+      const text = session.api.GetUTF8Text();
+      const rawJson = session.api.GetJSONText();
+      const parsed = JSON.parse(rawJson) as { blocks?: RawRecognizeData['blocks'] };
+      const version = session.api.Version();
+      this.progressListener?.({ status: 'recognizing text', progress: 1 });
+      return {
+        text,
+        blocks: parsed.blocks ?? null,
+        version,
+      } as RawRecognizeData;
+    } finally {
+      try {
+        session.tessModule.FS.unlink?.('/input');
+      } catch {
+        // 忽略临时文件清理异常
+      }
+    }
+  }
+
+  private async initDirectSession(generation: number, timeoutMs: number): Promise<DirectCoreSession> {
+    const coreUrl = `${ASSET_BASE}/tesseract-core-lstm.wasm.js`;
+    this.progressListener?.({ status: 'loading tesseract core', progress: 0 });
+    const coreFactory = await loadCoreScriptOnMainThread(coreUrl, timeoutMs);
+    if (this.generation !== generation) throw new Error('OCR 引擎已释放');
+
+    this.progressListener?.({ status: 'initializing tesseract', progress: 0 });
+    const tessModule = await withTimeout(
+      coreFactory({
+        TesseractProgress: (percent: number) => {
+          if (this.generation !== generation) return;
+          this.progressListener?.({
+            status: 'recognizing text',
+            progress: Math.max(0, Math.min(1, (percent - 30) / 70)),
+          });
+        },
+      }),
+      timeoutMs,
+      'OCR 内核初始化超时',
+    );
+    if (this.generation !== generation) throw new Error('OCR 引擎已释放');
+
+    this.progressListener?.({ status: 'loading language traineddata', progress: 0 });
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const fetchTimer =
+      controller && typeof setTimeout === 'function'
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : undefined;
+    let rawTrainedData: Uint8Array;
+    try {
+      const resp = await fetch(`${ASSET_BASE}/tessdata/eng.traineddata.gz`, {
+        signal: controller?.signal,
+      });
+      if (!resp.ok) {
+        throw new Error(`词模下载失败 (${resp.status})`);
+      }
+      rawTrainedData = new Uint8Array(await resp.arrayBuffer());
+    } finally {
+      if (fetchTimer !== undefined) clearTimeout(fetchTimer);
+    }
+    if (this.generation !== generation) throw new Error('OCR 引擎已释放');
+
+    this.progressListener?.({ status: 'loading language traineddata', progress: 0.6 });
+    const trainedData = await gunzipBytes(rawTrainedData, 10_000);
+    if (this.generation !== generation) throw new Error('OCR 引擎已释放');
+
+    tessModule.FS.writeFile('./eng.traineddata', trainedData);
+    this.progressListener?.({ status: 'initializing api', progress: 0 });
+    const api = new tessModule.TessBaseAPI();
+    const status = api.Init(null, 'eng', 1);
+    if (status === -1) {
+      api.End();
+      throw new Error('OCR 引擎词模初始化失败');
+    }
+    api.SetVariable('tessedit_pageseg_mode', String(Tesseract.PSM.SPARSE_TEXT));
+    api.SetVariable('preserve_interword_spaces', '1');
+    api.SetVariable('user_defined_dpi', '300');
+    this.progressListener?.({ status: 'initializing api', progress: 1 });
+
+    return { tessModule, api };
   }
 
   private createWorkerForCore(
@@ -194,12 +395,44 @@ export class TesseractEngine implements OcrEngine {
     timeoutMs: number,
   ): Promise<TesseractWorker> {
     let timedOut = false;
+    let rawWorker: { terminate: () => void } | null = null;
+    const cleanupRawWorker = () => {
+      if (rawWorker) {
+        try {
+          rawWorker.terminate();
+        } catch {
+          // 忽略底层 Worker 终止异常
+        }
+        if (this.pendingRawWorker === rawWorker) {
+          this.pendingRawWorker = null;
+        }
+        rawWorker = null;
+      }
+    };
+
     this.progressListener?.({ status: 'loading tesseract core', progress: 0 });
 
     const createPromise = new Promise<TesseractWorker>((resolve, reject) => {
+      const g = globalThis as { Worker?: typeof Worker };
+      const OriginalWorker = typeof g.Worker === 'function' ? g.Worker : undefined;
+      if (OriginalWorker) {
+        const PatchedWorker = function (
+          this: unknown,
+          scriptURL: string | URL,
+          options?: WorkerOptions,
+        ) {
+          const instance = new OriginalWorker(scriptURL, options);
+          rawWorker = instance;
+          return instance;
+        } as unknown as typeof Worker;
+        PatchedWorker.prototype = OriginalWorker.prototype;
+        g.Worker = PatchedWorker;
+      }
+
+      let workerPromise: Promise<TesseractWorker>;
       try {
-        void Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
-          workerPath: `${ASSET_BASE}/worker.min.js`,
+        workerPromise = Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
+          workerPath: `${ASSET_BASE}/worker.min.js?v=2`,
           corePath: coreFile,
           langPath: `${ASSET_BASE}/tessdata`,
           workerBlobURL: false,
@@ -213,29 +446,45 @@ export class TesseractEngine implements OcrEngine {
             });
           },
           errorHandler: (err) => {
+            cleanupRawWorker();
             reject(normalizeWorkerError(err, coreFile));
           },
-        }).then(
-          (worker) => {
-            if (timedOut || this.generation !== generation) {
-              void worker.terminate();
-              reject(new Error('OCR 引擎初始化已取消'));
-              return;
-            }
-            resolve(worker);
-          },
-          (err) => {
-            reject(normalizeWorkerError(err, coreFile));
-          },
-        );
+        });
       } catch (err) {
+        if (OriginalWorker) g.Worker = OriginalWorker;
+        cleanupRawWorker();
         reject(normalizeWorkerError(err, coreFile));
+        return;
       }
+      if (OriginalWorker) {
+        g.Worker = OriginalWorker;
+      }
+      this.pendingRawWorker = rawWorker;
+
+      void workerPromise.then(
+        (worker) => {
+          if (this.pendingRawWorker === rawWorker) {
+            this.pendingRawWorker = null;
+          }
+          if (timedOut || this.generation !== generation) {
+            void worker.terminate();
+            cleanupRawWorker();
+            reject(new Error('OCR 引擎初始化已取消'));
+            return;
+          }
+          resolve(worker);
+        },
+        (err) => {
+          cleanupRawWorker();
+          reject(normalizeWorkerError(err, coreFile));
+        },
+      );
     });
 
     return new Promise<TesseractWorker>((resolve, reject) => {
       const timer = setTimeout(() => {
         timedOut = true;
+        cleanupRawWorker();
         reject(new Error('OCR 引擎下载或初始化超时'));
       }, timeoutMs);
 
@@ -246,6 +495,7 @@ export class TesseractEngine implements OcrEngine {
         },
         (error) => {
           clearTimeout(timer);
+          cleanupRawWorker();
           reject(error);
         },
       );
@@ -290,10 +540,21 @@ export class TesseractEngine implements OcrEngine {
           return;
         } catch (error) {
           lastError = error;
-          // 若当前候选是因网络下载超时失败，不再立即并发启动第二个 3.9MB 核心下载抢带宽，直接交由用户重试
-          if (error instanceof Error && error.message.includes('超时')) {
-            break;
+        }
+      }
+
+      // 若 iPad WebKit / 主屏幕 PWA 下 Web Worker 或 importScripts 均无法启动，自动回退到主线程直连 WASM 模式
+      if (this.generation === generation) {
+        try {
+          const session = await this.initDirectSession(generation, WORKER_FALLBACK_TIMEOUT_MS);
+          if (this.generation !== generation) {
+            session.api.End();
+            throw new Error('OCR 引擎已释放');
           }
+          this.directSession = session;
+          return;
+        } catch (directError) {
+          lastError = lastError ?? directError;
         }
       }
 

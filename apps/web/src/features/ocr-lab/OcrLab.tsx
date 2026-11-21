@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OcrResult, OcrSentence, OcrWord } from '@kea/shared-types';
 import { pretranslatePageBatch } from '../../content/translate';
+import { loadZhDict } from '../../content/zh-dict';
 import { loadLexicon, lookupWord } from '../../domain/lexicon';
 import { buildSentences, findSentenceForWord } from '../../domain/sentence';
 import { isTrusted } from '../../platform/core/classify';
@@ -51,8 +52,6 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
   useEffect(() => {
     const engine = new TesseractEngine();
     engineRef.current = engine;
-    void engine.warm?.();
-    void loadLexicon();
     return () => {
       void engine.dispose();
       engineRef.current = null;
@@ -87,7 +86,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
     setSpeakingWordIndex(null);
 
     try {
-      const [image, lexicon] = await Promise.all([loadImage(url), loadLexicon()]);
+      const image = await loadImage(url);
       if (id !== runId.current) return;
 
       setScanLabel('正在优化清晰度…');
@@ -100,13 +99,15 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
         { canvas: pre.canvas, imageBytes: pre.imageBytes },
         (progress) => {
           if (id !== runId.current) return;
+          const pct = Math.round(progress.progress * 100);
           if (progress.status === 'recognizing text') {
-            const pct = Math.round(progress.progress * 100);
             setScanLabel(pct > 0 ? `正在认字 ${pct}%…` : '正在认字…');
           } else if (progress.status === 'loading tesseract core') {
             setScanLabel('首次加载离线识别内核…');
+          } else if (progress.status === 'initializing tesseract') {
+            setScanLabel('正在初始化识别内核…');
           } else if (progress.status === 'loading language traineddata') {
-            setScanLabel('首次下载英文词模…');
+            setScanLabel(pct > 0 && pct < 100 ? `首次下载英文词模 ${pct}%…` : '首次下载英文词模…');
           } else if (progress.status === 'initializing api') {
             setScanLabel('正在准备英文词典…');
           } else {
@@ -116,6 +117,13 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       );
       if (id !== runId.current) return;
 
+      const lexiconPromise = loadLexicon();
+      const lexicon = await Promise.race([
+        lexiconPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 800)),
+      ]);
+      if (id !== runId.current) return;
+
       const words = run.result.words.map((word) => ({
         ...word,
         lexiconHit: lookupWord(lexicon, word.text),
@@ -123,6 +131,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       const sentences = buildSentences(words, run.result.lines, isTrusted);
       setResult({ ...run.result, words, sentences });
       setStatus('done');
+      void loadZhDict();
 
       const trustedSentences = sentences.filter((s) => s.trusted).map((s) => ({ id: s.id, text: s.text }));
       void pretranslatePageBatch(trustedSentences).then((refinements) => {
@@ -357,6 +366,15 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
                         onClick={() => void applyImage(source.url, source.fromObjectUrl)}
                       >
                         🔄 重试识别
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost kid-retry-btn"
+                        onClick={() => {
+                          window.location.href = `${import.meta.env.BASE_URL}update.html`;
+                        }}
+                      >
+                        🛠️ 修复并刷新
                       </button>
                     </div>
                   ) : null}

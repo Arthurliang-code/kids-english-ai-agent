@@ -88,8 +88,13 @@ function fetchPageWithTimeout(request, timeoutMs) {
 }
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
-    const cache = await caches.open(APP_CACHE);
-    await cache.addAll(SHELL_ASSETS);
+    try {
+      const cache = await caches.open(APP_CACHE);
+      await cache.addAll(SHELL_ASSETS);
+    } catch {
+      // 忽略预缓存失败，确保新版 SW 一定能完成安装并替换旧版
+    }
+    await self.skipWaiting();
   })());
 });
 self.addEventListener('message', (event) => {
@@ -158,7 +163,8 @@ self.addEventListener('fetch', (event) => {
       let cache = null;
       try {
         cache = await caches.open(isStatic ? STATIC_CACHE : APP_CACHE);
-        const cached = await cache.match(event.request, { ignoreSearch: true });
+        const ignoreSearch = !url.search.includes('v=');
+        const cached = await cache.match(event.request, { ignoreSearch });
         if (cached) return cached;
       } catch {
         cache = null;

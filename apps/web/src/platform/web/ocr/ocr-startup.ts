@@ -130,8 +130,9 @@ export function classifyRecognitionError(err: unknown): RecognitionErrorInfo {
   }
 
   if (msg.includes('OCR 引擎') || msg.includes('Worker') || msg.includes('worker')) {
+    const detail = msg.trim() ? `（${msg.trim().slice(0, 80)}）` : '';
     return {
-      message: '离线认字引擎未能启动，请检查网络或点“重试识别”；若持续失败可刷新页面重试。',
+      message: `离线认字引擎未能启动，请检查网络后点“重试识别”或“修复并刷新”${detail}。`,
       shouldResetEngine: true,
     };
   }
@@ -140,6 +141,65 @@ export function classifyRecognitionError(err: unknown): RecognitionErrorInfo {
     message: '这一页识别失败，可以点“重试识别”或再拍一次。',
     shouldResetEngine: true,
   };
+}
+
+/**
+ * 直接通过 DecompressionStream writer/reader 解压 Gzip 字节流（带超时保护），
+ * 避开 iPadOS WebKit 下 `new Response(new Blob([bytes]).stream().pipeThrough(...))` 偶发流锁死问题。
+ */
+export async function gunzipBytes(bytes: Uint8Array, timeoutMs = 8000): Promise<Uint8Array> {
+  const isGzip = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  if (!isGzip) return bytes;
+
+  if (typeof DecompressionStream !== 'function') {
+    throw new Error('当前浏览器不支持 Gzip 解压');
+  }
+
+  const decompressPromise = (async () => {
+    const ds = new DecompressionStream('gzip');
+    const writer = ds.writable.getWriter();
+    void writer
+      .write(bytes as unknown as BufferSource)
+      .then(() => writer.close())
+      .catch(() => undefined);
+
+    const reader = ds.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      out.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return out;
+  })();
+
+  if (!(timeoutMs > 0) || typeof setTimeout !== 'function') {
+    return decompressPromise;
+  }
+
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Gzip 解压超时')), timeoutMs);
+    decompressPromise.then(
+      (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 /** 将 `data:image/...;base64,...` 同步解码为 Uint8Array，用作 canvas.toBlob 失败/超时时的兜底 */

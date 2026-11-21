@@ -6,6 +6,7 @@
 export function listenForAppUpdate(onReady: (apply: () => void) => void): void {
   if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return;
 
+  const hadController = Boolean(navigator.serviceWorker.controller);
   let userRequestedReload = false;
   let reloaded = false;
   const reloadOnce = () => {
@@ -15,8 +16,13 @@ export function listenForAppUpdate(onReady: (apply: () => void) => void): void {
   };
 
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!userRequestedReload) return;
-    reloadOnce();
+    if (userRequestedReload) {
+      reloadOnce();
+      return;
+    }
+    if (hadController) {
+      onReady(() => reloadOnce());
+    }
   });
 
   void navigator.serviceWorker
