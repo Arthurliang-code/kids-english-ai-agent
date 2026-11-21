@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type CSSProperties } from 'react';
+import {
+  createCameraPreviewController,
+  type CameraPreviewController,
+} from './camera-utils';
 
 interface CameraSheetProps {
   open: boolean;
@@ -9,65 +13,120 @@ interface CameraSheetProps {
 
 const CAPTURE_MAX_EDGE = 2048;
 
+const HIDDEN_FILE_INPUT_STYLE: CSSProperties = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+  pointerEvents: 'none',
+};
+
 export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraSheetProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const controllerRef = useRef<CameraPreviewController | null>(null);
+  const capturingRef = useRef(false);
+  const selectedImageRef = useRef(false);
+  const systemCameraInputId = useId();
+  const albumInputId = useId();
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [needsPlay, setNeedsPlay] = useState(false);
   const [capturing, setCapturing] = useState(false);
 
   useEffect(() => {
     if (!open) return;
 
-    let cancelled = false;
-    let stream: MediaStream | null = null;
+    capturingRef.current = false;
+    selectedImageRef.current = false;
     setError(null);
     setLive(false);
+    setNeedsPlay(false);
     setCapturing(false);
 
-    void navigator.mediaDevices
-      .getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1440 },
-        },
-        audio: false,
-      })
-      .then(async (mediaStream) => {
-        if (cancelled) {
-          mediaStream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        stream = mediaStream;
-        streamRef.current = mediaStream;
-        const video = videoRef.current;
-        if (!video) return;
-        video.srcObject = mediaStream;
-        await video.play().catch(() => undefined);
-        if (!cancelled) setLive(true);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setError('打不开相机，可以直接从相册里选一张。');
-      });
+    const controller = createCameraPreviewController({
+      getMediaDevices: () => (typeof navigator !== 'undefined' ? navigator.mediaDevices : null),
+      getVideo: () => videoRef.current,
+      shouldResume: () => !capturingRef.current && !selectedImageRef.current,
+      onLive: () => {
+        setError(null);
+        setLive(true);
+        setNeedsPlay(false);
+      },
+      onNeedsPlay: () => {
+        setError(null);
+        setLive(false);
+        setNeedsPlay(true);
+      },
+      onSuspended: () => {
+        setLive(false);
+        setNeedsPlay(false);
+      },
+      onError: (message) => {
+        setLive(false);
+        setNeedsPlay(false);
+        setError(message);
+      },
+    });
+    controllerRef.current = controller;
+
+    const handleVisibilityChange = () => {
+      controller.handleVisibilityChange(document.visibilityState);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    if (document.visibilityState !== 'hidden') {
+      void controller.start();
+    }
 
     return () => {
-      cancelled = true;
-      stream?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      controller.dispose();
+      if (controllerRef.current === controller) {
+        controllerRef.current = null;
+      }
+      capturingRef.current = false;
       setLive(false);
+      setNeedsPlay(false);
       setCapturing(false);
     };
   }, [open]);
 
   if (!open) return null;
 
+  const handleResumeVideo = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    try {
+      await video.play();
+      if (!controllerRef.current?.getState().hasActiveStream) return;
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        setNeedsPlay(false);
+        setLive(true);
+        return;
+      }
+    } catch {
+      // 回落到系统相机/相册兜底
+    }
+    if (!controllerRef.current?.getState().hasActiveStream) return;
+    controllerRef.current?.releaseActiveStream();
+    setNeedsPlay(false);
+    setError('当前模式无法自动开启取景画面，请点下方「用系统相机拍」或「从相册选一张」。');
+  };
+
   const handleCapture = () => {
     if (capturing) return;
     const video = videoRef.current;
-    if (!video || video.videoWidth === 0) return;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      setError('相机画面还没准备好，请点下方「用系统相机拍」或返回重试。');
+      return;
+    }
 
+    capturingRef.current = true;
     setCapturing(true);
     const scale = Math.min(1, CAPTURE_MAX_EDGE / Math.max(video.videoWidth, video.videoHeight));
     const canvas = document.createElement('canvas');
@@ -75,28 +134,39 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
     canvas.height = Math.round(video.videoHeight * scale);
     const ctx = canvas.getContext('2d');
     if (!ctx) {
+      capturingRef.current = false;
       setCapturing(false);
+      setError('拍照画布初始化失败，请点下方「用系统相机拍」或「从相册选一张」。');
       return;
     }
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    // 拍下瞬间先停掉实时摄像头流，释放 iPad 内存与 GPU 给后续识别
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
+    // 拍下瞬间先停掉实时摄像头流并清空 srcObject，释放 iPad 内存与 GPU 给后续识别
+    controllerRef.current?.releaseActiveStream();
 
     let settled = false;
     const finishCapture = (url: string, fromObjectUrl: boolean) => {
       if (settled) return;
       settled = true;
+      selectedImageRef.current = true;
       window.clearTimeout(fallbackTimer);
       onCapture(url, fromObjectUrl);
+    };
+    const failCapture = () => {
+      if (settled) return;
+      settled = true;
+      capturingRef.current = false;
+      window.clearTimeout(fallbackTimer);
+      setCapturing(false);
+      setLive(false);
+      setError('拍照导出失败，请点下方「用系统相机拍」或「从相册选一张」。');
     };
 
     const fallbackTimer = window.setTimeout(() => {
       try {
         finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
       } catch {
-        setCapturing(false);
+        failCapture();
       }
     }, 1200);
 
@@ -107,7 +177,11 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
             if (blob) {
               finishCapture(URL.createObjectURL(blob), true);
             } else {
-              finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+              try {
+                finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+              } catch {
+                failCapture();
+              }
             }
           },
           'image/jpeg',
@@ -119,7 +193,19 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
       }
     }
 
-    finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+    try {
+      finishCapture(canvas.toDataURL('image/jpeg', 0.88), false);
+    } catch {
+      failCapture();
+    }
+  };
+
+  const handleFallbackFile = (file: File | undefined) => {
+    if (!file || !onPickFile) return;
+    selectedImageRef.current = true;
+    controllerRef.current?.dispose();
+    onClose();
+    onPickFile(file);
   };
 
   return (
@@ -142,30 +228,63 @@ export function CameraSheet({ open, onClose, onCapture, onPickFile }: CameraShee
               <span className="corner br" />
             </div>
           ) : null}
-          {!live && !error && <div className="video-hint">正在打开相机…</div>}
+          {!live && !needsPlay && !error && <div className="video-hint">正在打开相机…</div>}
+          {needsPlay && !error ? (
+            <div className="video-hint">
+              <p>点一下开启实时取景画面（如处于低电量模式）</p>
+              <button className="primary" type="button" onClick={() => void handleResumeVideo()}>
+                开启相机画面
+              </button>
+            </div>
+          ) : null}
           {error && (
             <div className="video-hint error">
               <p>{error}</p>
               {onPickFile ? (
-                <label className="kid-album">
-                  从相册选一张
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      event.target.value = '';
-                      if (file) {
-                        onClose();
-                        onPickFile(file);
-                      }
-                    }}
-                  />
-                </label>
+                <div className="video-hint-actions">
+                  <label className="kid-album" htmlFor={systemCameraInputId}>
+                    📷 用系统相机拍
+                  </label>
+                  <label className="kid-album" htmlFor={albumInputId}>
+                    🖼️ 从相册选一张
+                  </label>
+                </div>
               ) : null}
             </div>
           )}
         </div>
+
+        {onPickFile ? (
+          <>
+            <input
+              id={systemCameraInputId}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              tabIndex={error ? undefined : -1}
+              aria-hidden={error ? undefined : true}
+              style={HIDDEN_FILE_INPUT_STYLE}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                handleFallbackFile(file);
+              }}
+            />
+            <input
+              id={albumInputId}
+              type="file"
+              accept="image/*"
+              tabIndex={error ? undefined : -1}
+              aria-hidden={error ? undefined : true}
+              style={HIDDEN_FILE_INPUT_STYLE}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = '';
+                handleFallbackFile(file);
+              }}
+            />
+          </>
+        ) : null}
 
         <div className="sheet-foot">
           <button

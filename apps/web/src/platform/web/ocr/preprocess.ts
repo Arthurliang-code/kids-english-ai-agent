@@ -1,3 +1,5 @@
+import { dataUrlToUint8Array } from './ocr-startup';
+
 export interface PreprocessConfig {
   /** 识别输入图的长边上限 */
   maxEdge: number;
@@ -43,15 +45,25 @@ export function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
+function canvasToDataUrlBytes(canvas: HTMLCanvasElement, quality: number): Uint8Array | undefined {
+  try {
+    return dataUrlToUint8Array(canvas.toDataURL('image/jpeg', quality));
+  } catch {
+    return undefined;
+  }
+}
+
 function canvasToJpegBytes(canvas: HTMLCanvasElement, quality = 0.88): Promise<Uint8Array | undefined> {
-  if (typeof canvas.toBlob !== 'function') return Promise.resolve(undefined);
+  if (typeof canvas.toBlob !== 'function') {
+    return Promise.resolve(canvasToDataUrlBytes(canvas, quality));
+  }
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value: Uint8Array | undefined) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(value);
+      resolve(value ?? canvasToDataUrlBytes(canvas, quality));
     };
     const timer = setTimeout(() => finish(undefined), 1500);
 
@@ -62,10 +74,14 @@ function canvasToJpegBytes(canvas: HTMLCanvasElement, quality = 0.88): Promise<U
             finish(undefined);
             return;
           }
-          void blob
-            .arrayBuffer()
-            .then((buffer) => finish(new Uint8Array(buffer)))
-            .catch(() => finish(undefined));
+          if (typeof blob.arrayBuffer === 'function') {
+            void blob
+              .arrayBuffer()
+              .then((buffer) => finish(new Uint8Array(buffer)))
+              .catch(() => finish(undefined));
+          } else {
+            finish(undefined);
+          }
         },
         'image/jpeg',
         quality,

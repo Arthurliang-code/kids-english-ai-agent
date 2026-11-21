@@ -3,6 +3,11 @@ import type { Worker as TesseractWorker } from 'tesseract.js';
 import type { OcrLine, OcrResult, OcrWord, PixelBox, Quad } from '@kea/shared-types';
 import type { OcrEngine, OcrEngineProgress, OcrInput, OcrEngineRun } from '../../core/types';
 import { normalizeEnglishToken, recoverPronounI } from '../../../domain/text';
+import {
+  checkOcrRuntimeSupport,
+  normalizeWorkerError,
+  selectCoreCandidates,
+} from './ocr-startup';
 
 /**
  * 静态资源放在 public/tesseract，避免依赖 jsdelivr 等境外 CDN。
@@ -21,41 +26,9 @@ import { normalizeEnglishToken, recoverPronounI } from '../../../domain/text';
  *    Worker 内 IndexedDB 锁死或读出旧版不兼容缓存。
  */
 const ASSET_BASE = `${import.meta.env.BASE_URL}tesseract`;
-const WORKER_INIT_TIMEOUT_MS = 45_000;
+const WORKER_SIMD_TIMEOUT_MS = 25_000;
+const WORKER_FALLBACK_TIMEOUT_MS = 40_000;
 const RECOGNIZE_TIMEOUT_MS = 25_000;
-
-/** wasm-feature-detect 标准探测字节码 */
-const RELAXED_SIMD_WASM = new Uint8Array([
-  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 15, 1, 13, 0, 65, 1, 253,
-  15, 65, 2, 253, 15, 253, 128, 2, 11,
-]);
-const SIMD_WASM = new Uint8Array([
-  0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15,
-  253, 98, 11,
-]);
-
-function isAppleTouchDevice(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  return (
-    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-  );
-}
-
-function getCoreCandidates(): string[] {
-  const candidates: string[] = [];
-  const canValidate =
-    typeof WebAssembly === 'object' && typeof WebAssembly.validate === 'function';
-
-  if (canValidate && !isAppleTouchDevice() && WebAssembly.validate(RELAXED_SIMD_WASM)) {
-    candidates.push(`${ASSET_BASE}/tesseract-core-relaxedsimd-lstm.wasm.js`);
-  }
-  if (canValidate && WebAssembly.validate(SIMD_WASM)) {
-    candidates.push(`${ASSET_BASE}/tesseract-core-simd-lstm.wasm.js`);
-  }
-  candidates.push(`${ASSET_BASE}/tesseract-core-lstm.wasm.js`);
-  return candidates;
-}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -93,7 +66,7 @@ export class TesseractEngine implements OcrEngine {
   private worker: TesseractWorker | null = null;
   private initPromise: Promise<void> | null = null;
   private progressListener: ((p: OcrEngineProgress) => void) | null = null;
-  private disposed = false;
+  private generation = 0;
 
   warm(): Promise<void> {
     return this.ensureWorker().catch(() => undefined);
@@ -207,53 +180,64 @@ export class TesseractEngine implements OcrEngine {
   }
 
   async dispose(): Promise<void> {
-    this.disposed = true;
+    this.generation += 1;
     this.progressListener = null;
-    await this.worker?.terminate();
+    const worker = this.worker;
     this.worker = null;
     this.initPromise = null;
+    await worker?.terminate();
   }
 
-  private createWorkerForCore(coreFile: string): Promise<TesseractWorker> {
+  private createWorkerForCore(
+    coreFile: string,
+    generation: number,
+    timeoutMs: number,
+  ): Promise<TesseractWorker> {
     let timedOut = false;
     this.progressListener?.({ status: 'loading tesseract core', progress: 0 });
 
     const createPromise = new Promise<TesseractWorker>((resolve, reject) => {
-      void Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
-        workerPath: `${ASSET_BASE}/worker.min.js`,
-        corePath: coreFile,
-        langPath: `${ASSET_BASE}/tessdata`,
-        workerBlobURL: false,
-        cacheMethod: 'none',
-        gzip: true,
-        logger: (message) => {
-          if (timedOut || this.disposed) return;
-          this.progressListener?.({
-            status: message.status,
-            progress: Math.max(0, Math.min(1, message.progress)),
-          });
-        },
-        errorHandler: (err) => {
-          reject(err instanceof Error ? err : new Error(String(err)));
-        },
-      }).then(
-        (worker) => {
-          if (timedOut || this.disposed) {
-            void worker.terminate();
-            reject(new Error('OCR 引擎初始化已取消'));
-            return;
-          }
-          resolve(worker);
-        },
-        reject,
-      );
+      try {
+        void Tesseract.createWorker('eng', Tesseract.OEM.LSTM_ONLY, {
+          workerPath: `${ASSET_BASE}/worker.min.js`,
+          corePath: coreFile,
+          langPath: `${ASSET_BASE}/tessdata`,
+          workerBlobURL: false,
+          cacheMethod: 'none',
+          gzip: true,
+          logger: (message) => {
+            if (timedOut || this.generation !== generation) return;
+            this.progressListener?.({
+              status: message.status,
+              progress: Math.max(0, Math.min(1, message.progress)),
+            });
+          },
+          errorHandler: (err) => {
+            reject(normalizeWorkerError(err, coreFile));
+          },
+        }).then(
+          (worker) => {
+            if (timedOut || this.generation !== generation) {
+              void worker.terminate();
+              reject(new Error('OCR 引擎初始化已取消'));
+              return;
+            }
+            resolve(worker);
+          },
+          (err) => {
+            reject(normalizeWorkerError(err, coreFile));
+          },
+        );
+      } catch (err) {
+        reject(normalizeWorkerError(err, coreFile));
+      }
     });
 
     return new Promise<TesseractWorker>((resolve, reject) => {
       const timer = setTimeout(() => {
         timedOut = true;
         reject(new Error('OCR 引擎下载或初始化超时'));
-      }, WORKER_INIT_TIMEOUT_MS);
+      }, timeoutMs);
 
       createPromise.then(
         (value) => {
@@ -269,18 +253,26 @@ export class TesseractEngine implements OcrEngine {
   }
 
   private ensureWorker(): Promise<void> {
-    if (this.disposed) this.disposed = false;
     if (this.initPromise) return this.initPromise;
 
+    const generation = this.generation;
     this.initPromise = (async () => {
-      const candidates = getCoreCandidates();
+      const support = checkOcrRuntimeSupport();
+      if (!support.ok) {
+        throw new Error(support.reason);
+      }
+
+      const candidates = selectCoreCandidates(ASSET_BASE);
       let lastError: unknown = null;
 
-      for (const coreFile of candidates) {
-        if (this.disposed) throw new Error('OCR 引擎已释放');
+      for (let i = 0; i < candidates.length; i += 1) {
+        const coreFile = candidates[i]!;
+        if (this.generation !== generation) throw new Error('OCR 引擎已释放');
+        const isLast = i === candidates.length - 1;
+        const timeoutMs = isLast ? WORKER_FALLBACK_TIMEOUT_MS : WORKER_SIMD_TIMEOUT_MS;
         try {
-          const worker = await this.createWorkerForCore(coreFile);
-          if (this.disposed) {
+          const worker = await this.createWorkerForCore(coreFile, generation, timeoutMs);
+          if (this.generation !== generation) {
             void worker.terminate();
             throw new Error('OCR 引擎已释放');
           }
@@ -290,6 +282,10 @@ export class TesseractEngine implements OcrEngine {
             preserve_interword_spaces: '1',
             user_defined_dpi: '300',
           });
+          if (this.generation !== generation) {
+            void worker.terminate();
+            throw new Error('OCR 引擎已释放');
+          }
           this.worker = worker;
           return;
         } catch (error) {
@@ -300,10 +296,13 @@ export class TesseractEngine implements OcrEngine {
       throw lastError instanceof Error ? lastError : new Error('OCR 引擎初始化失败');
     })();
 
-    this.initPromise.catch(() => {
-      this.initPromise = null;
+    const currentInit = this.initPromise;
+    currentInit.catch(() => {
+      if (this.initPromise === currentInit) {
+        this.initPromise = null;
+      }
     });
 
-    return this.initPromise;
+    return currentInit;
   }
 }

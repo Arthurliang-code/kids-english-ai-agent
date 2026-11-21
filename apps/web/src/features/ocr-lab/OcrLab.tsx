@@ -5,6 +5,7 @@ import { loadLexicon, lookupWord } from '../../domain/lexicon';
 import { buildSentences, findSentenceForWord } from '../../domain/sentence';
 import { isTrusted } from '../../platform/core/classify';
 import type { OcrEngine } from '../../platform/core/types';
+import { classifyRecognitionError } from '../../platform/web/ocr/ocr-startup';
 import { loadImage, preprocess } from '../../platform/web/ocr/preprocess';
 import { TesseractEngine } from '../../platform/web/ocr/tesseract-engine';
 import { UpdateBanner } from '../../pwa/UpdateBanner';
@@ -140,13 +141,12 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
       });
     } catch (err) {
       if (id !== runId.current) return;
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('超时')) {
-        setError('识别模型加载或扫描超时，请检查网络或点“再拍一页”重试。');
+      console.error('[OcrLab] recognition failed:', err);
+      const classified = classifyRecognitionError(err);
+      setError(classified.message);
+      if (classified.shouldResetEngine) {
         void engineRef.current?.dispose();
         engineRef.current = null;
-      } else {
-        setError('这一页看不清，再拍一次吧。');
       }
       setStatus('error');
     }
@@ -237,6 +237,10 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
   const trustedCount = words.filter(isTrusted).length;
   const trustedSentenceCount = sentences.filter((s) => s.trusted).length;
   const hasCardOpen = Boolean(selected || selectedSentence);
+
+  const handleCloseCamera = useCallback(() => {
+    setCameraOpen(false);
+  }, []);
 
   return (
     <div className="app">
@@ -335,7 +339,18 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
                         : '👆 点一页里的绿色词框，听单词和所在整句'}
                     </p>
                   ) : null}
-                  {error ? <p className="kid-alert">{error}</p> : null}
+                  {error ? (
+                    <div className="kid-alert-row" role="alert">
+                      <p className="kid-alert">{error}</p>
+                      <button
+                        type="button"
+                        className="primary kid-retry-btn"
+                        onClick={() => void applyImage(source.url, source.fromObjectUrl)}
+                      >
+                        🔄 重试识别
+                      </button>
+                    </div>
+                  ) : null}
                   {status === 'done' && trustedCount === 0 ? (
                     <p className="kid-alert">没有认出能读的词，把书放平再拍一次。</p>
                   ) : null}
@@ -440,7 +455,7 @@ export function OcrLab({ onApplyUpdate }: { onApplyUpdate: (() => void) | null }
 
       <CameraSheet
         open={cameraOpen}
-        onClose={() => setCameraOpen(false)}
+        onClose={handleCloseCamera}
         onCapture={(url, fromObjectUrl) => void handleCapture(url, fromObjectUrl)}
         onPickFile={(file) => void handleFile(file)}
       />

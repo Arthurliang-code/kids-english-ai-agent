@@ -14,7 +14,7 @@ export function listenForAppUpdate(onReady: (apply: () => void) => void): void {
     .register(`${import.meta.env.BASE_URL}sw.js`, { updateViaCache: 'none' })
     .then((registration) => {
       const check = () => {
-        void registration.update();
+        void registration.update().catch(() => undefined);
       };
       check();
       document.addEventListener('visibilitychange', () => {
@@ -25,5 +25,6 @@ export function listenForAppUpdate(onReady: (apply: () => void) => void): void {
       if (registration.waiting && hadController) {
         onReady(() => registration.waiting?.postMessage({ type: 'skip-waiting' }));
       }
-    });
+    })
+    .catch(() => undefined);
 }
